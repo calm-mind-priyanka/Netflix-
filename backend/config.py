@@ -14,6 +14,8 @@ PORT = int(os.getenv("PORT", "8080"))
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
 SITE_SECRET = os.environ["SITE_SECRET"]
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+# Backward-compatible internal name used by app.py. No password hash generation is required.
+ADMIN_PASSWORD_HASH = ADMIN_PASSWORD
 PUBLIC_URL = os.getenv("PUBLIC_URL", "")
 CATALOG_TTL = int(os.getenv("CATALOG_TTL", "60"))
