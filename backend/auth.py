@@ -20,12 +20,21 @@ def hash_admin_password(password, iterations=210000):
     return f"pbkdf2_sha256${iterations}${salt}${digest}"
 
 def verify_admin_password(password, stored):
+    """Verify the admin password configured directly in the environment.
+
+    The password is supplied through Koyeb's private environment variables, so
+    no local hash-generation command is required. compare_digest is used for
+    a timing-safe comparison.
+    """
     try:
-        algo,it,salt,digest=stored.split("$",3)
-        if algo!="pbkdf2_sha256": return False
-        calc=hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), int(it)).hex()
-        return hmac.compare_digest(calc,digest)
-    except Exception:return False
+        if not stored:
+            return False
+        return hmac.compare_digest(
+            str(password or "").encode("utf-8"),
+            str(stored).encode("utf-8"),
+        )
+    except Exception:
+        return False
 
 def make_admin_session(ttl=43200):
     exp=int(time.time())+ttl
