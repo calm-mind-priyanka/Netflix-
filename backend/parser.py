@@ -2,11 +2,10 @@ import hashlib
 import html
 import re
 from collections import defaultdict
+from difflib import SequenceMatcher
 
-# These patterns intentionally contain single backslashes. Raw strings must
-# pass the regex escapes through unchanged.
 QUALITY_RE = re.compile(
-    r"(?<!\w)(2160p|1440p|1080p|720p|576p|480p|360p|4320p|4k|8k|2k)(?!\w)",
+    r"(?<!\w)(2160p|1440p|1080p|720p|576p|480p|360p|4320p|8k|4k|2k)(?!\w)",
     re.I,
 )
 SE_RE = re.compile(
@@ -14,39 +13,43 @@ SE_RE = re.compile(
     re.I,
 )
 SEASON_RE = re.compile(r"(?<!\w)(?:season|s)\s*0*(\d{1,3})(?!\w)", re.I)
-EP_RE = re.compile(r"(?<!\w)(?:episode|ep|e)\s*0*(\d{1,4})(?!\w)", re.I)
+EP_RE = re.compile(r"(?<!\w)(?:episode|ep)\s*0*(\d{1,4})(?!\w)", re.I)
 YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
 EXT_RE = re.compile(r"\.(?:mkv|mp4|avi|mov|webm|m4v|ts|mpeg|mpg)$", re.I)
 
 LANGUAGES = [
-    "dual audio",
-    "multi audio",
-    "hindi",
-    "english",
-    "bengali",
-    "bangla",
-    "tamil",
-    "telugu",
-    "malayalam",
-    "kannada",
-    "marathi",
-    "punjabi",
-    "gujarati",
-    "bhojpuri",
-    "korean",
-    "spanish",
-    "french",
-    "german",
-    "chinese",
-    "japanese",
-    "urdu",
+    "dual audio", "multi audio", "hindi", "english", "bengali", "bangla",
+    "tamil", "telugu", "malayalam", "kannada", "marathi", "punjabi",
+    "gujarati", "bhojpuri", "korean", "spanish", "french", "german",
+    "chinese", "japanese", "urdu",
 ]
+LANGUAGE_CODES = {
+    "hin": "Hindi", "hindi": "Hindi", "eng": "English", "english": "English",
+    "tam": "Tamil", "tamil": "Tamil", "tel": "Telugu", "telugu": "Telugu",
+    "mal": "Malayalam", "malayalam": "Malayalam", "kan": "Kannada", "kannada": "Kannada",
+    "ben": "Bengali", "bengali": "Bengali", "bangla": "Bangla", "mar": "Marathi",
+    "marathi": "Marathi", "pun": "Punjabi", "punjabi": "Punjabi", "guj": "Gujarati",
+    "gujarati": "Gujarati", "bho": "Bhojpuri", "bhojpuri": "Bhojpuri", "kor": "Korean",
+    "korean": "Korean", "spa": "Spanish", "spanish": "Spanish", "fra": "French",
+    "french": "French", "ger": "German", "german": "German", "chi": "Chinese",
+    "chinese": "Chinese", "jpn": "Japanese", "japanese": "Japanese", "urd": "Urdu", "urdu": "Urdu",
+}
 
+# Release/technical tags are metadata, not title words. The patterns deliberately
+# cover forms such as AAC2.0 and H.264 so their numeric suffixes cannot leak into titles.
 TECH_RE = re.compile(
-    r"(?<!\w)(?:WEB[- .]?DL|WEB[- .]?Rip|WEBRip|BluRay|BRRip|BDRip|HDRip|HDTV|DVDRip|CAMRip|CAM|HDCAM|HEVC|x264|x265|H264|H265|10bit|AAC|DDP?|DD\+|Atmos|ESub|ESubs|NF|AMZN|MAX|DSNP|PROPER|REPACK|UNCUT|REMUX|HQ|HD|FHD|UHD|FULLHD|MKV|MP4|AVI|MOV)(?!\w)",
+    r"(?<!\w)(?:WEB[- .]?(?:DL|Rip)|BluRay|BRRip|BDRip|HDRip|HDTV|DVDRip|CAMRip|HDCAM|"
+    r"HEVC|AVC|x264|x265|H[ .-]?264|H[ .-]?265|10\s*bit|8\s*bit|"
+    r"AAC(?:\s*[0-9]+(?:(?:\s*[.]\s*|\s+)[0-9]+)?)?|AC3|EAC3|DDP?(?:\s*[0-9]+(?:(?:\s*[.]\s*|\s+)[0-9]+)?)?|DD\+|DTS(?:[- .]?HD)?|"
+    r"Atmos|ESubS?|NF|AMZN|DSNP|MAX|iTunes|PROPER|REPACK|UNCUT|REMUX|WEB|HQ|FHD|UHD|FULLHD|"
+    r"MKV|MP4|AVI|MOV|TS|10bit|HDR10(?:\+)?|DV|DOLBY(?:\s+VISION)?)(?!\w)",
     re.I,
 )
-
+AUDIO_RE = re.compile(
+    r"(?<!\w)(dual\s+audio|multi\s+audio|original\s+audio|AAC(?:\s*[0-9]+(?:(?:\s*[.]\s*|\s+)[0-9]+)?)?|"
+    r"AC3|EAC3|DDP?(?:\s*[0-9]+(?:(?:\s*[.]\s*|\s+)[0-9]+)?)?|DD\+|DTS(?:[- .]?HD)?|Atmos)(?!\w)",
+    re.I,
+)
 BRACKET_RE = re.compile(r"\[[^\]]*\]|\([^)]*\)")
 SEPARATORS_RE = re.compile(r"[._]+")
 
@@ -57,6 +60,43 @@ def _source_text(doc):
     return f"{name} {caption}".strip()
 
 
+def _extract_languages(source):
+    low = source.casefold()
+    found = []
+    for key, label in sorted(LANGUAGE_CODES.items(), key=lambda item: len(item[0]), reverse=True):
+        if re.search(rf"(?<!\w){re.escape(key)}(?!\w)", low) and label not in found:
+            found.append(label)
+    return found
+
+
+def _extract_audio(source):
+    matches = []
+    for match in AUDIO_RE.finditer(source or ""):
+        value = re.sub(r"\s+", " ", match.group(1).strip()).upper()
+        if value in {"DUAL AUDIO", "MULTI AUDIO", "ORIGINAL AUDIO"}:
+            value = value.title()
+        elif value.startswith("AAC"):
+            numeric = re.search(r"AAC\s*(\d+)\s*(?:[.]\s*)?(\d+)?", match.group(1), re.I)
+            if numeric and numeric.group(2):
+                value = f"AAC{numeric.group(1)}.{numeric.group(2)}"
+            else:
+                value = re.sub(r"\s+", "", value)
+        elif value.startswith("EAC3"):
+            value = "E-AC-3"
+        if value not in matches:
+            matches.append(value)
+    return matches or ["Unknown"]
+
+
+def _extract_codec(source):
+    low = source or ""
+    if re.search(r"(?<!\w)(?:HEVC|H[ .-]?265|x265)(?!\w)", low, re.I):
+        return "H.265/HEVC"
+    if re.search(r"(?<!\w)(?:AVC|H[ .-]?264|x264)(?!\w)", low, re.I):
+        return "H.264/AVC"
+    return "Unknown"
+
+
 def parse_doc(doc):
     name = str(doc.get("file_name") or "").strip()
     caption = str(doc.get("caption") or "")
@@ -65,24 +105,18 @@ def parse_doc(doc):
     se = SE_RE.search(source)
     season = int(se.group(1)) if se else None
     episode = int(se.group(2)) if se else None
-
     if season is None:
         sm = SEASON_RE.search(source)
         season = int(sm.group(1)) if sm else None
-
     if episode is None:
         em = EP_RE.search(source)
         episode = int(em.group(1)) if em else None
 
     qm = QUALITY_RE.search(source)
     ym = YEAR_RE.search(source)
-    low = source.casefold()
-
-    language = "Unknown"
-    for lang in sorted(LANGUAGES, key=len, reverse=True):
-        if re.search(rf"(?<!\w){re.escape(lang)}(?!\w)", low):
-            language = lang.title()
-            break
+    languages = _extract_languages(source)
+    audio = _extract_audio(source)
+    language = " + ".join(languages) if languages else "Unknown"
 
     file_id = doc.get("_id")
     if file_id is None:
@@ -96,59 +130,123 @@ def parse_doc(doc):
         "file_size": int(doc.get("file_size") or 0),
         "file_type": doc.get("file_type"),
         "mime_type": doc.get("mime_type"),
-        "title": clean_title(name),
+        "title": clean_title(name or caption),
         "type": "series" if season is not None or episode is not None else "movie",
         "season": season,
         "episode": episode,
         "quality": qm.group(1).upper() if qm else "Auto",
         "language": language,
+        "languages": languages or ["Unknown"],
+        "audio": audio,
+        "codec": _extract_codec(source),
         "year": int(ym.group(1)) if ym else None,
         "poster": extract_poster(caption),
     }
 
 
+def _remove_release_brackets(text):
+    def repl(match):
+        value = match.group(0)
+        if (
+            QUALITY_RE.search(value) or SE_RE.search(value) or SEASON_RE.search(value)
+            or YEAR_RE.search(value) or TECH_RE.search(value) or AUDIO_RE.search(value)
+            or any(re.search(rf"(?<!\w){re.escape(lang)}(?!\w)", value, re.I) for lang in LANGUAGE_CODES)
+        ):
+            return " "
+        return value
+    return BRACKET_RE.sub(repl, text)
+
+
 def clean_title(value):
-    """Convert a filename into a readable title without losing title numbers."""
+    """Normalize a filename to a display/search title without destroying title numbers."""
     s = str(value or "").strip()
     s = EXT_RE.sub("", s)
-    s = BRACKET_RE.sub(" ", s)
+    original = s
+    s = _remove_release_brackets(s)
     s = SE_RE.sub(" ", s)
     s = SEASON_RE.sub(" ", s)
     s = EP_RE.sub(" ", s)
     s = QUALITY_RE.sub(" ", s)
     s = TECH_RE.sub(" ", s)
-    s = YEAR_RE.sub(" ", s)
+    s = AUDIO_RE.sub(" ", s)
 
-    for lang in LANGUAGES:
+    # Year is release metadata when it is at the end or follows another title token.
+    # Keep a numeric-only title such as "1917" intact.
+    year_matches = list(YEAR_RE.finditer(s))
+    for match in reversed(year_matches):
+        if match.end() == len(s.strip()) or match.start() > 0:
+            s = s[:match.start()] + " " + s[match.end():]
+            break
+
+    for lang in LANGUAGE_CODES:
         s = re.sub(rf"(?<!\w){re.escape(lang)}(?!\w)", " ", s, flags=re.I)
 
-    # Release/channel tags commonly found in filenames.
-    s = re.sub(
-        r"(?<!\w)(?:480p|576p|720p|1080p|1440p|2160p|4k|8k|hdr|proper|repack|"
-        r"uncut|remux|dual|audio|dubbed|subbed|subs|full\s*movie)(?!\w)",
-        " ",
-        s,
-        flags=re.I,
-    )
+    s = re.sub(r"(?<!\w)(?:dubbed|subbed|subs|full\s*movie)(?!\w)", " ", s, flags=re.I)
     s = SEPARATORS_RE.sub(" ", s)
     s = re.sub(r"[-]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip(" -_.")
+    if not s:
+        s = original
     return s or "Untitled"
 
 
+def normalize_query(query):
+    value = str(query or "").strip()
+    se = SE_RE.search(value)
+    season = int(se.group(1)) if se else None
+    episode = int(se.group(2)) if se else None
+    if season is None:
+        sm = re.search(r"(?<!\w)(?:season|s)\s*0*(\d{1,3})(?!\w)", value, re.I)
+        if sm:
+            season = int(sm.group(1))
+    if episode is None:
+        em = re.search(r"(?<!\w)episode\s*0*(\d{1,4})(?!\w)", value, re.I)
+        if em:
+            episode = int(em.group(1))
+
+    year_match = YEAR_RE.search(value)
+    year = int(year_match.group(1)) if year_match else None
+
+    title_text = value
+    if se:
+        title_text = title_text.replace(se.group(0), " ")
+    title_text = re.sub(r"(?<!\w)season\s*0*\d{1,3}(?!\w)", " ", title_text, flags=re.I)
+    title_text = re.sub(r"(?<!\w)episode\s*0*\d{1,4}(?!\w)", " ", title_text, flags=re.I)
+    if year_match:
+        title_text = title_text.replace(year_match.group(0), " ")
+    title_text = re.sub(r"\s+", " ", title_text).strip()
+    return {"title": clean_title(title_text), "season": season, "episode": episode, "year": year}
+
+
+def search_title_score(title, query_title):
+    a = normalize_for_search(title)
+    b = normalize_for_search(query_title)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if b in a or a in b:
+        return 0.88
+    ratio = SequenceMatcher(None, a, b).ratio()
+    a_tokens, b_tokens = a.split(), b.split()
+    if not a_tokens or not b_tokens:
+        return ratio
+    token_score = sum(max(SequenceMatcher(None, bt, at).ratio() for at in a_tokens) for bt in b_tokens) / len(b_tokens)
+    return max(ratio, token_score * 0.96)
+
+
+def normalize_for_search(value):
+    value = re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold())
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def extract_poster(caption):
-    match = re.search(
-        r'https?://[^\s<>"\']+\.(?:jpg|jpeg|png|webp)(?:\?[^\s<>"\']*)?',
-        caption or "",
-        re.I,
-    )
+    match = re.search(r'https?://[^\s<>"\']+\.(?:jpg|jpeg|png|webp)(?:\?[^\s<>"\']*)?', caption or "", re.I)
     return match.group(0) if match else None
 
 
 def stable_id(title, kind):
-    return hashlib.sha256(
-        f"{kind}:{title.casefold()}".encode("utf-8")
-    ).hexdigest()[:20]
+    return hashlib.sha256(f"{kind}:{normalize_for_search(title)}".encode("utf-8")).hexdigest()[:20]
 
 
 def quality_key(value):
@@ -158,44 +256,42 @@ def quality_key(value):
 
 def normalize(docs):
     titles = {}
-
+    order = []
     for doc in docs:
         parsed = parse_doc(doc)
+        if not parsed["file_id"]:
+            continue
         title_id = stable_id(parsed["title"], parsed["type"])
-
-        title = titles.setdefault(
-            title_id,
-            {
+        if title_id not in titles:
+            titles[title_id] = {
                 "id": title_id,
                 "title": parsed["title"],
                 "type": parsed["type"],
                 "year": parsed["year"],
+                "years": set([parsed["year"]]) if parsed["year"] else set(),
                 "poster": parsed["poster"],
                 "description": None,
                 "genre": None,
                 "rating": None,
                 "seasons": defaultdict(lambda: defaultdict(list)),
                 "variants": [],
-            },
-        )
+                "_order": len(order),
+            }
+            order.append(title_id)
 
-        if not title["year"] and parsed["year"]:
-            title["year"] = parsed["year"]
+        title = titles[title_id]
+        if parsed["year"]:
+            title["years"].add(parsed["year"])
+            if not title["year"]:
+                title["year"] = parsed["year"]
         if not title["poster"] and parsed["poster"]:
             title["poster"] = parsed["poster"]
 
         variant = {
             key: parsed[key]
             for key in (
-                "file_id",
-                "file_ref",
-                "file_name",
-                "file_size",
-                "file_type",
-                "mime_type",
-                "quality",
-                "language",
-                "caption",
+                "file_id", "file_ref", "file_name", "file_size", "file_type", "mime_type",
+                "quality", "language", "languages", "audio", "codec", "caption", "season", "episode", "year",
             )
         }
 
@@ -205,7 +301,9 @@ def normalize(docs):
             title["variants"].append(variant)
 
     result = []
-    for title in titles.values():
+    for title_id in order:
+        title = titles[title_id]
+        title["years"] = sorted(title["years"])
         title["seasons"] = [
             {
                 "season": int(season),
@@ -215,9 +313,7 @@ def normalize(docs):
                         "variants": sorted(
                             variants,
                             key=lambda item: (
-                                item["language"],
-                                quality_key(item["quality"]),
-                                item["file_name"].casefold(),
+                                quality_key(item["quality"]), item["language"].casefold(), item["file_name"].casefold()
                             ),
                         ),
                     }
@@ -228,12 +324,8 @@ def normalize(docs):
         ]
         title["variants"] = sorted(
             title["variants"],
-            key=lambda item: (
-                item["language"],
-                quality_key(item["quality"]),
-                item["file_name"].casefold(),
-            ),
+            key=lambda item: (quality_key(item["quality"]), item["language"].casefold(), item["file_name"].casefold()),
         )
+        title.pop("_order", None)
         result.append(title)
-
-    return sorted(result, key=lambda item: item["title"].casefold())
+    return result
