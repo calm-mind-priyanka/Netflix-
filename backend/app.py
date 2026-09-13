@@ -48,22 +48,21 @@ LOGGER = logging.getLogger("streambox")
 BASE = Path(__file__).resolve().parent.parent
 
 META_CACHE = {}
-CATALOG_CACHE = {"at": 0.0, "items": []}
+
+# Keep homepage catalog work bounded. The website only needs enough recent
+# media records to build the visible homepage; it must never materialize the
+# entire bot collection in RAM on a small Koyeb instance.
+HOME_DOC_LIMIT = 300
+HOME_TITLE_LIMIT = 100
+HOME_ENRICH_LIMIT = 66
 
 # Maintenance is deliberately kept in memory. The website must not create or
 # modify a collection inside the Auto Filter Bot's MongoDB database.
 MAINTENANCE = False
 
 
-async def all_titles(force=False):
-    now = time.time()
-    if (
-        not force
-        and CATALOG_CACHE["items"]
-        and now - CATALOG_CACHE["at"] < CATALOG_TTL
-    ):
-        return CATALOG_CACHE["items"]
-
+async def all_titles(limit=None):
+    """Build a bounded catalog directly from MongoDB without a process-wide catalog cache."""
     if not DATABASE_URI:
         raise RuntimeError("DATABASE_URI is not configured")
 
@@ -77,12 +76,13 @@ async def all_titles(force=False):
         "mime_type": 1,
         "caption": 1,
     }
-    # Stream MongoDB documents directly into the catalog builder. The previous
-    # implementation first materialized the entire collection into a Python list,
-    # which could exhaust a small Koyeb instance before /api/home completed.
-    items = await normalize_async(iter_media(projection=projection))
-    CATALOG_CACHE.update(at=now, items=items)
-    return items
+
+    requested = HOME_DOC_LIMIT if limit is None else int(limit)
+    # CATALOG_MAX_DOCS remains an operator setting, but a single homepage
+    # request is hard-capped so an accidental large environment value cannot
+    # turn into an OOM-sized in-memory catalog.
+    bounded = max(1, min(requested, CATALOG_MAX_DOCS, HOME_DOC_LIMIT))
+    return await normalize_async(iter_media(projection=projection, limit=bounded))
 
 
 async def tmdb_meta(title, kind, year=None):
@@ -161,10 +161,13 @@ def _search_score(item, query_title):
 
 
 async def home(request):
-    items = await all_titles()
+    # Only the records needed to populate the visible homepage are parsed.
+    # TMDB is also limited to the number of unique cards the current UI can show.
+    items = (await all_titles(limit=HOME_DOC_LIMIT))[:HOME_TITLE_LIMIT]
     enriched = []
-    for item in items[:100]:
+    for item in items[:HOME_ENRICH_LIMIT]:
         enriched.append(await enrich(item))
+    enriched.extend(items[len(enriched):])
     return web.json_response({"ok": True, "items": enriched, "count": len(items)})
 
 
@@ -174,7 +177,10 @@ async def search(request):
         return web.json_response({"ok": True, "items": [], "count": 0})
 
     parsed = normalize_query(query)
-    items = await all_titles()
+    # Search MongoDB directly and normalize only the bounded matching result set.
+    # This avoids rebuilding the entire catalog for every keystroke/search.
+    docs = await search_media(query, limit=100)
+    items = normalize(docs)
     candidates = []
 
     for item in items:
@@ -217,7 +223,9 @@ async def search(request):
 
 async def title(request):
     title_id = request.match_info["id"]
-    for item in await all_titles():
+    # Homepage/search responses already contain complete title objects, so this
+    # endpoint is only a fallback. Keep the fallback bounded as well.
+    for item in await all_titles(limit=HOME_DOC_LIMIT):
         if item["id"] == title_id:
             return web.json_response({"ok": True, **await enrich(item)})
     raise web.HTTPNotFound(text="Title not found")
@@ -369,11 +377,7 @@ async def admin_status(request):
             "titles": len(items),
             "movies": sum(item["type"] == "movie" for item in items),
             "series": sum(item["type"] == "series" for item in items),
-            "catalog_cache_age": (
-                round(time.time() - CATALOG_CACHE["at"], 1)
-                if CATALOG_CACHE["at"]
-                else None
-            ),
+            "catalog_cache_age": None,
         }
     )
 
@@ -394,7 +398,7 @@ async def admin_toggle_maintenance(request):
 async def admin_refresh(request):
     require_admin(request)
     META_CACHE.clear()
-    items = await all_titles(force=True)
+    items = await all_titles(limit=HOME_DOC_LIMIT)
     return web.json_response({"ok": True, "count": len(items)})
 
 
