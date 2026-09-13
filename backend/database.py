@@ -57,50 +57,54 @@ async def collection_counts():
     return counts
 
 async def iter_media(query=None, projection=None, limit=None):
-    """Read the existing Auto Filter Bot collection(s), never writing to them."""
+    """Read the existing Auto Filter Bot collection(s), read-only.
+
+    A database that is unreachable is skipped only when another configured
+    database successfully answers. If every configured database fails, raise a
+    clear error instead of silently returning an empty catalog.
+    """
     query = query or {}
     seen = set()
     remaining = None if limit is None else max(0, int(limit))
+    configured = 0
+    succeeded = 0
+    errors = []
 
-    for collection in _collections():
-        if remaining == 0:
-            break
-        cursor = collection.find(query, projection).sort("$natural", -1)
-        if remaining is not None:
-            cursor = cursor.limit(remaining)
+    for name, collection in (("primary", media), ("secondary", media2)):
+        if collection is None or remaining == 0:
+            continue
+        configured += 1
+        try:
+            cursor = collection.find(query, projection).sort("$natural", -1)
+            if remaining is not None:
+                cursor = cursor.limit(remaining)
 
-        emitted_from_collection = 0
-        async for doc in cursor:
-            key = _normalize_id(doc.get("_id"))
-            if not key:
-                key = _normalize_id(doc.get("file_id"))
-            if key in seen:
-                continue
-            seen.add(key)
-            yield doc
-            emitted_from_collection += 1
+            emitted_from_collection = 0
+            async for doc in cursor:
+                key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                yield doc
+                emitted_from_collection += 1
 
-        if remaining is not None:
-            remaining = max(0, remaining - emitted_from_collection)
+            succeeded += 1
+            if remaining is not None:
+                remaining = max(0, remaining - emitted_from_collection)
+        except Exception as exc:
+            errors.append(f"{name}: {type(exc).__name__}")
+            LOGGER.exception("%s MongoDB catalog read failed", name)
+            continue
 
-async def find_media(file_id, projection=None):
-    """Find one canonical Auto Filter Bot media document by its Mongo _id."""
-    if media is None:
-        raise RuntimeError("DATABASE_URI is not configured")
+    if configured == 0:
+        raise RuntimeError("No MongoDB database is configured")
+    if succeeded == 0:
+        raise RuntimeError(
+            "All configured MongoDB databases are unreachable or the collection "
+            "cannot be read (" + ", ".join(errors) + ")"
+        )
 
-    value = str(file_id)
-    for collection in _collections():
-        doc = await collection.find_one({"_id": value}, projection)
-        if doc is not None:
-            return doc
-
-        # Compatibility for a database that may contain a separately stored
-        # file_id field. The original Auto Filter Bot maps file_id to _id, so
-        # this is only a safe fallback.
-        doc = await collection.find_one({"file_id": value}, projection)
-        if doc is not None:
-            return doc
-    return None
 
 def build_search_filter(query):
     """Build a case-insensitive token search against file_name/caption."""
@@ -124,7 +128,11 @@ def build_search_filter(query):
     return {"$and": clauses}
 
 async def search_media(query, limit=100):
-    """Search both existing collections without changing their data."""
+    """Search the existing collections without changing their data.
+
+    Partial database failure is tolerated, but an all-database failure is
+    reported to the API instead of being mistaken for "no search results".
+    """
     search_filter = build_search_filter(query)
     if not search_filter:
         return []
@@ -141,19 +149,41 @@ async def search_media(query, limit=100):
         "caption": 1,
         "file_ref": 1,
     }
+    configured = 0
+    succeeded = 0
+    errors = []
 
-    for collection in _collections():
-        cursor = (
-            collection.find(search_filter, projection)
-            .sort("$natural", -1)
-            .limit(per_collection)
+    for name, collection in (("primary", media), ("secondary", media2)):
+        if collection is None:
+            continue
+        configured += 1
+        try:
+            cursor = (
+                collection.find(search_filter, projection)
+                .sort("$natural", -1)
+                .limit(per_collection)
+            )
+            async for doc in cursor:
+                key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                docs.append(doc)
+                if len(docs) >= limit:
+                    return docs
+            succeeded += 1
+        except Exception as exc:
+            errors.append(f"{name}: {type(exc).__name__}")
+            LOGGER.exception("%s MongoDB search failed", name)
+            continue
+
+    if configured == 0:
+        raise RuntimeError("No MongoDB database is configured")
+    if succeeded == 0:
+        raise RuntimeError(
+            "All configured MongoDB databases are unreachable or the collection "
+            "cannot be searched (" + ", ".join(errors) + ")"
         )
-        async for doc in cursor:
-            key = _normalize_id(doc.get("_id"))
-            if key in seen:
-                continue
-            seen.add(key)
-            docs.append(doc)
-            if len(docs) >= limit:
-                return docs
     return docs
+
