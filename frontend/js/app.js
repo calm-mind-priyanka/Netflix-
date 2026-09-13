@@ -11,18 +11,29 @@ const escapeHtml=value=>String(value??"").replace(/[&<>"']/g,match=>({
 }[match]));
 
 function poster(title){
-  return title.poster
-    ? `style="background-image:url('${escapeHtml(title.poster)}')"`
-    : "";
+  if(!title.poster){
+    return `<div class="poster posterFallback">🎬<span class="cardShade"></span></div>`;
+  }
+
+  return `<div class="poster">
+    <img
+      class="posterImage"
+      src="${escapeHtml(title.poster)}"
+      alt=""
+      loading="lazy"
+      decoding="async"
+      referrerpolicy="no-referrer"
+      onerror="this.remove();this.parentElement.classList.add('posterFallback')"
+    >
+    <span class="cardShade"></span>
+  </div>`;
 }
 
 function card(title){
   const season=title.search_season??"";
   const episode=title.search_episode??"";
   return `<article class="card" data-id="${escapeHtml(title.id)}" data-season="${escapeHtml(season)}" data-episode="${escapeHtml(episode)}">
-    <div class="poster" ${poster(title)}>
-      ${title.poster?"":"🎬"}<span class="cardShade"></span>
-    </div>
+    ${poster(title)}
     <strong>${escapeHtml(title.title)}</strong>
     <small>${title.type==="series"?"Series":"Movie"}${title.year?" • "+title.year:""}</small>
   </article>`;
@@ -92,6 +103,7 @@ async function load(){
     }
 
     renderContinue();
+    return true;
 
   }catch(error){
     const message=error.message||"Unable to load the catalog.";
@@ -115,6 +127,7 @@ async function load(){
     </div>`;
 
     $("#retryCatalog").onclick=load;
+    return false;
   }
 }
 
@@ -471,4 +484,64 @@ $("#query").onkeydown=event=>{
   }
 };
 
-load();
+function renderIntroSamples(){
+  const target=$("#introSamples");
+  if(!target)return;
+
+  const samples=titles
+    .filter(item=>item?.poster)
+    .slice(0,4);
+
+  target.innerHTML=samples.map(item=>
+    `<div class="introPoster">
+      <img
+        src="${escapeHtml(item.poster)}"
+        alt="${escapeHtml(item.title)}"
+        loading="lazy"
+        decoding="async"
+        referrerpolicy="no-referrer"
+        onerror="this.parentElement.remove()"
+      >
+    </div>`
+  ).join("");
+}
+
+function showStage(id){
+  ["splashStage","loadingStage","introStage"].forEach(stageId=>{
+    const stage=document.getElementById(stageId);
+    if(stage)stage.classList.toggle("hidden",stageId!==id);
+  });
+}
+
+async function startExperience(){
+  const startup=$("#startup");
+  const appShell=$("#appShell");
+  const startButton=$("#startStreaming");
+
+  if(!startup||!appShell||!startButton){
+    await load();
+    return;
+  }
+
+  // Catalog loading happens during the lightweight startup sequence so the
+  // introduction can reuse a few real catalog posters without another request.
+  const catalogPromise=load();
+  const splashDelay=new Promise(resolve=>setTimeout(resolve,900));
+
+  await Promise.all([catalogPromise,splashDelay]);
+
+  showStage("loadingStage");
+  const minimumLoading=new Promise(resolve=>setTimeout(resolve,900));
+  await Promise.all([catalogPromise,minimumLoading]);
+
+  renderIntroSamples();
+  showStage("introStage");
+
+  startButton.onclick=()=>{
+    startup.classList.add("startupDone");
+    appShell.classList.remove("startupHidden");
+    setTimeout(()=>startup.remove(),500);
+  };
+}
+
+startExperience();
