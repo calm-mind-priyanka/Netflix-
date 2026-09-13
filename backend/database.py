@@ -106,6 +106,45 @@ async def iter_media(query=None, projection=None, limit=None):
         )
 
 
+async def find_media(file_id, projection=None):
+    """Find one existing Auto Filter Bot media document by its canonical ID.
+
+    The bot stores the Telegram file ID as MongoDB ``_id``. For compatibility
+    with older records, ``file_id`` is also checked. Reads are attempted against
+    both configured databases without modifying either collection.
+    """
+    if not _collections():
+        raise RuntimeError("No MongoDB database is configured")
+
+    value = str(file_id)
+    errors = []
+
+    for name, collection in (("primary", media), ("secondary", media2)):
+        if collection is None:
+            continue
+        try:
+            doc = await collection.find_one({"_id": value}, projection)
+            if doc is not None:
+                return doc
+
+            doc = await collection.find_one({"file_id": value}, projection)
+            if doc is not None:
+                return doc
+        except Exception as exc:
+            errors.append(f"{name}: {type(exc).__name__}")
+            LOGGER.exception("%s MongoDB media lookup failed", name)
+            continue
+
+    # A missing document is a normal lookup result. Only report an error when
+    # every configured database actually failed during the lookup.
+    if errors and len(errors) == len(_collections()):
+        raise RuntimeError(
+            "All configured MongoDB databases are unreachable or the collection "
+            "cannot be searched (" + ", ".join(errors) + ")"
+        )
+    return None
+
+
 def build_search_filter(query):
     """Build a case-insensitive token search against file_name/caption."""
     import re
