@@ -1,11 +1,11 @@
 from pathlib import Path
 import time
 from aiohttp import web, ClientSession
-from .database import iter_media, get_setting, set_setting
+from .database import iter_media, get_setting, set_setting, ping, collection_counts
 from .parser import normalize
 from .auth import make_stream_token, validate_stream_token, make_admin_session, validate_admin_session, verify_admin_password
 from .stream import create_client, Streamer
-from .config import HOST,PORT,TMDB_API_KEY,ADMIN_USERNAME,ADMIN_PASSWORD_HASH,CATALOG_TTL
+from .config import HOST,PORT,TMDB_API_KEY,ADMIN_USERNAME,ADMIN_PASSWORD_HASH,CATALOG_TTL,DATABASE_NAME,COLLECTION_NAME,MULTIPLE_DB
 
 BASE=Path(__file__).resolve().parent.parent
 META_CACHE={}
@@ -80,7 +80,19 @@ async def download(request):
     if not validate_stream_token(tok,fid):raise web.HTTPForbidden(text="Invalid or expired download token")
     return await request.app["streamer"].stream(request,fid,attachment=True)
 
-async def health(request):return web.json_response({"ok":True})
+async def health(request):
+    return web.json_response({"ok": True})
+
+async def diagnostics(request):
+    counts = await collection_counts()
+    return web.json_response({
+        "ok": True,
+        "database": DATABASE_NAME,
+        "collection": COLLECTION_NAME,
+        "multiple_db": MULTIPLE_DB,
+        "counts": counts,
+    })
+
 
 def is_admin(request):return validate_admin_session(request.cookies.get("admin_session",""))
 
@@ -114,6 +126,23 @@ async def admin_refresh(request):
     require_admin(request); META_CACHE.clear(); items=await all_titles(force=True)
     return web.json_response({"ok":True,"count":len(items)})
 
+async def api_error_middleware(app, handler):
+    async def middleware(request):
+        try:
+            return await handler(request)
+        except web.HTTPException as exc:
+            if request.path.startswith("/api/"):
+                return web.json_response({"ok": False, "error": exc.text or exc.reason}, status=exc.status)
+            raise
+        except Exception as exc:
+            # Never turn backend/database/parser failures into a silent empty catalog.
+            import logging
+            logging.getLogger("streambox").exception("Unhandled request failure: %s", exc)
+            if request.path.startswith("/api/"):
+                return web.json_response({"ok": False, "error": "Backend failure", "detail": str(exc)}, status=500)
+            raise
+    return middleware
+
 async def maintenance_middleware(app,handler):
     async def middleware(request):
         if request.path.startswith("/admin") or request.path=="/health":return await handler(request)
@@ -127,8 +156,8 @@ async def startup(app):app["tg"]=await create_client();app["streamer"]=Streamer(
 async def cleanup(app):await app["tg"].stop()
 
 def create_app():
-    app=web.Application(client_max_size=1024*1024,middlewares=[maintenance_middleware])
-    app.router.add_get("/health",health)
+    app=web.Application(client_max_size=1024*1024,middlewares=[api_error_middleware, maintenance_middleware])
+    app.router.add_get("/health",health);app.router.add_get("/api/diagnostics",diagnostics)
     app.router.add_get("/api/home",home);app.router.add_get("/api/search",search);app.router.add_get("/api/title/{id}",title);app.router.add_get("/api/stream-token/{file_id}",token);app.router.add_get("/api/stream/{file_id}",stream);app.router.add_get("/api/download/{file_id}",download)
     app.router.add_get("/admin",admin_login);app.router.add_post("/admin/login",admin_login);app.router.add_post("/admin/logout",admin_logout);app.router.add_get("/admin/api/status",admin_status);app.router.add_post("/admin/api/maintenance",admin_toggle_maintenance);app.router.add_post("/admin/api/refresh",admin_refresh)
     async def frontend_index(request):
