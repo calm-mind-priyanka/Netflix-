@@ -62,3 +62,13 @@ def missing_core_settings():
 
 def telegram_ready():
     return bool(BOT_TOKEN and API_ID and API_HASH)
+
+try:
+    TMDB_CACHE_MAX = max(16, int(_env("TMDB_CACHE_MAX", "128")))
+except ValueError:
+    TMDB_CACHE_MAX = 128
+
+try:
+    TRANSCODE_CONCURRENCY = max(1, int(_env("TRANSCODE_CONCURRENCY", "1")))
+except ValueError:
+    TRANSCODE_CONCURRENCY = 1
