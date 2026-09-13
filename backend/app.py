@@ -35,7 +35,13 @@ from .database import (
     iter_media,
     search_media,
 )
-from .parser import normalize, normalize_for_search, normalize_query, search_title_score
+from .parser import (
+    normalize,
+    normalize_async,
+    normalize_for_search,
+    normalize_query,
+    search_title_score,
+)
 from .stream import Streamer, create_client
 
 LOGGER = logging.getLogger("streambox")
