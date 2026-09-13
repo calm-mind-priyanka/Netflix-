@@ -5,14 +5,16 @@ const Player={
   variant:null,
   lang:null,
   quality:null,
+  audio:null,
 
   async open(titleId,label,variants,next){
     this.titleId=String(titleId);
-    this.variants=Array.isArray(variants)?variants:[];
+    this.variants=Array.isArray(variants)?variants.filter(item=>item?.file_id):[];
     this.current={label,next};
     this.variant=null;
     this.lang=null;
     this.quality=null;
+    this.audio=null;
 
     const player=document.getElementById("player");
     const menu=document.getElementById("menu");
@@ -54,55 +56,88 @@ const Player={
   },
 
   render(){
-    const languages=[...new Set(
-      this.variants.map(item=>item.language).filter(Boolean)
-    )];
-    const qualities=[...new Set(
-      this.variants.map(item=>item.quality).filter(Boolean)
-    )];
+    const languages=[...new Set(this.variants.flatMap(item=>Array.isArray(item.languages)?item.languages:[item.language]).filter(Boolean).filter(value=>value!=="Unknown"))];
+    const audios=[...new Set(this.variants.flatMap(item=>Array.isArray(item.audio)?item.audio:[]).filter(Boolean).filter(value=>value!=="Unknown"))];
+    const qualities=[...new Set(this.variants.map(item=>item.quality).filter(Boolean))];
 
-    document.getElementById("audio").innerHTML=languages.map(
-      language=>`<button data-lang="${esc(language)}">${esc(language)}</button>`
+    document.getElementById("language").innerHTML=languages.map(
+      language=>`<button data-player-lang="${playerEscape(language)}">${playerEscape(language)}</button>`
     ).join("");
-
+    document.getElementById("audio").innerHTML=audios.map(
+      audio=>`<button data-player-audio="${playerEscape(audio)}">${playerEscape(audio)}</button>`
+    ).join("");
     document.getElementById("quality").innerHTML=qualities.map(
-      quality=>`<button data-q="${esc(quality)}">${esc(quality)}</button>`
+      quality=>`<button data-player-quality="${playerEscape(quality)}">${playerEscape(quality)}</button>`
     ).join("");
 
-    document.querySelectorAll("[data-lang]").forEach(button=>{
-      button.onclick=()=>this.choose("language",button.dataset.lang);
+    document.querySelectorAll("[data-player-lang]").forEach(button=>{
+      button.onclick=()=>this.choose("language",button.dataset.playerLang);
     });
-    document.querySelectorAll("[data-q]").forEach(button=>{
-      button.onclick=()=>this.choose("quality",button.dataset.q);
+    document.querySelectorAll("[data-player-audio]").forEach(button=>{
+      button.onclick=()=>this.choose("audio",button.dataset.playerAudio);
+    });
+    document.querySelectorAll("[data-player-quality]").forEach(button=>{
+      button.onclick=()=>this.choose("quality",button.dataset.playerQuality);
     });
   },
 
+  matchesLanguage(variant,value){
+    return (Array.isArray(variant?.languages)?variant.languages:[variant?.language]).includes(value);
+  },
+
+  matchesAudio(variant,value){
+    return (Array.isArray(variant?.audio)?variant.audio:[]).includes(value);
+  },
+
   async choose(key,value){
-    let language=this.lang||this.variants[0]?.language;
-    let quality=this.quality||null;
+    const desired={
+      language:this.lang,
+      quality:this.quality,
+      audio:this.audio,
+    };
+    desired[key]=value;
 
-    if(key==="language")language=value;
-    else quality=value;
-
-    let variant=this.variants.find(item=>
-      item.language===language&&(!quality||item.quality===quality)
+    const exact=this.variants.find(variant=>
+      (!desired.language||this.matchesLanguage(variant,desired.language))&&
+      (!desired.quality||variant.quality===desired.quality)&&
+      (!desired.audio||this.matchesAudio(variant,desired.audio))
     );
 
-    if(!variant&&key==="quality"){
-      variant=this.variants.find(item=>item.quality===quality);
-    }
-    if(!variant){
-      variant=this.variants.find(item=>item.language===language)||this.variants[0];
+    // Never invent a combination. If the requested combination does not exist,
+    // choose a real variant matching the newly selected option and reset the
+    // other filters to that variant's actual metadata.
+    const candidate=exact||this.variants.find(variant=>{
+      if(key==="language")return this.matchesLanguage(variant,value);
+      if(key==="quality")return variant.quality===value;
+      return this.matchesAudio(variant,value);
+    });
+
+    if(!candidate){
+      this.showError("That option is not available for this file.");
+      return;
     }
 
-    this.lang=variant?.language||language||null;
-    this.quality=variant?.quality||quality||null;
+    this.lang=(Array.isArray(candidate.languages)?candidate.languages:[candidate.language]).find(Boolean)||null;
+    this.quality=candidate.quality||null;
+    this.audio=(Array.isArray(candidate.audio)?candidate.audio:[]).find(value=>value!=="Unknown")||null;
 
     try{
-      await this.select(variant);
+      await this.select(candidate);
     }catch(error){
       this.showError(error.message||"Unable to switch file version.");
     }
+  },
+
+  needsCompatibility(variant){
+    const name=String(variant?.file_name||"").toLowerCase();
+    const mime=String(variant?.mime_type||"").toLowerCase();
+    const codec=String(variant?.codec||"").toLowerCase();
+    const audio=(Array.isArray(variant?.audio)?variant.audio:[]).join(" ").toLowerCase();
+    const nonMp4=!(/\.(mp4|m4v|webm)$/.test(name)||mime.includes("mp4")||mime.includes("webm"));
+    const h265=codec.includes("h.265")||codec.includes("hevc")||codec.includes("x265");
+    const browserAudio=audio.includes("aac")||audio==="";
+    const incompatibleAudio=!browserAudio&&/(ddp|eac3|ac3|dts|atmos)/i.test(audio);
+    return nonMp4||h265||incompatibleAudio;
   },
 
   async select(variant){
@@ -116,7 +151,10 @@ const Player={
 
     if(!data.token)throw new Error("Server did not return a stream token.");
 
-    const source="/api/stream/"+encodeURIComponent(variant.file_id)
+    const endpoint=this.needsCompatibility(variant)
+      ?"/api/stream-compatible/"
+      :"/api/stream/";
+    const source=endpoint+encodeURIComponent(variant.file_id)
       +"?token="+encodeURIComponent(data.token);
 
     video.src=source;
@@ -124,13 +162,17 @@ const Player={
 
     video.addEventListener("loadedmetadata",()=>{
       if(position>0){
-        try{video.currentTime=position}catch(_){}
+        try{video.currentTime=position}catch(_){ }
       }
       this.clearError();
       video.play().catch(()=>{});
     },{once:true});
 
     this.variant=variant;
+    const languages=Array.isArray(variant.languages)?variant.languages:[variant.language];
+    this.lang=languages.find(Boolean)||null;
+    this.quality=variant.quality||null;
+    this.audio=(Array.isArray(variant.audio)?variant.audio:[]).find(value=>value!=="Unknown")||null;
     saveLocal(this.titleId,variant.file_id,position);
   },
 
@@ -181,7 +223,7 @@ const Player={
   }
 };
 
-function esc(value){
+function playerEscape(value){
   return String(value??"").replace(/[&<>"']/g,match=>({
     "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
   }[match]));
