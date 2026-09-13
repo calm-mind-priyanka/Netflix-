@@ -1,4 +1,5 @@
 let titles=[];
+let searchTitles=[];
 const $=selector=>document.querySelector(selector);
 
 const escapeHtml=value=>String(value??"").replace(/[&<>"']/g,match=>({
@@ -160,11 +161,28 @@ function renderContinue(){
 
 async function showDetails(id,preferredSeason=null,preferredEpisode=null){
   try{
-    const title=
+    const localTitle=
       titles.find(item=>item.id===id)||
-      await API.get(
+      searchTitles.find(item=>item.id===id)||
+      null;
+
+    let title=localTitle;
+    if(localTitle?.title){
+      try{
+        const expanded=await API.get(
+          "/api/title/"+encodeURIComponent(id)+
+          "?q="+encodeURIComponent(localTitle.title)
+        );
+        if(expanded?.id===id) title=expanded;
+      }catch(_){
+        // Keep the already returned search/home object usable if the targeted
+        // expansion is temporarily unavailable.
+      }
+    }else{
+      title=await API.get(
         "/api/title/"+encodeURIComponent(id)
       );
+    }
 
     if(!title){
       throw new Error("Title not found");
@@ -376,6 +394,8 @@ async function doSearch(){
         "Invalid search response"
       );
     }
+
+    searchTitles=data.items;
 
     if(!data.items.length){
 
