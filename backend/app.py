@@ -121,6 +121,18 @@ def _tmdb_cache_put(key, value):
         META_CACHE.popitem(last=False)
 
 
+def _tmdb_image_url(path, size):
+    # TMDB returns image paths such as "/abc123.jpg". Keep the browser-facing
+    # URL absolute and use a moderate size so mobile clients do not pull
+    # unnecessarily large images.
+    if not path:
+        return None
+    value = str(path).strip()
+    if not value.startswith("/"):
+        value = "/" + value
+    return f"https://image.tmdb.org/t/p/{size}{value}"
+
+
 async def tmdb_meta(title, kind, year=None):
     if not TMDB_API_KEY:
         return {}
@@ -146,8 +158,16 @@ async def tmdb_meta(title, kind, year=None):
                 },
             ) as response:
                 if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "TMDB search returned HTTP %s for %r: %s",
+                        response.status,
+                        title,
+                        body[:180],
+                    )
+                    _tmdb_cache_put(key, {})
                     return {}
-                data = await response.json()
+                data = await response.json(content_type=None)
 
         results = data.get("results") or []
         wanted = normalize_for_search(title)
@@ -162,14 +182,8 @@ async def tmdb_meta(title, kind, year=None):
 
         date = result.get("first_air_date") or result.get("release_date") or ""
         output = {
-            "poster": (
-                f"https://image.tmdb.org/t/p/w500{result['poster_path']}"
-                if result.get("poster_path") else None
-            ),
-            "backdrop": (
-                f"https://image.tmdb.org/t/p/w1280{result['backdrop_path']}"
-                if result.get("backdrop_path") else None
-            ),
+            "poster": _tmdb_image_url(result.get("poster_path"), "w342"),
+            "backdrop": _tmdb_image_url(result.get("backdrop_path"), "w780"),
             "description": result.get("overview"),
             "year": int(date[:4]) if date[:4].isdigit() else None,
             "rating": result.get("vote_average"),
@@ -178,6 +192,7 @@ async def tmdb_meta(title, kind, year=None):
         return output
     except Exception:
         LOGGER.exception("TMDB lookup failed for %s", title)
+        _tmdb_cache_put(key, {})
         return {}
 
 
@@ -401,11 +416,15 @@ async def admin_login(request):
         raise web.HTTPUnauthorized(text="Invalid admin credentials")
 
     response = web.json_response({"ok": True})
+    # Koyeb terminates HTTPS at the edge, while the aiohttp process may see
+    # an internal HTTP connection. Matching the cookie's Secure flag to the
+    # request scheme keeps the same protected session usable on Koyeb and in
+    # local HTTP testing without exposing the credential itself.
     response.set_cookie(
         "admin_session",
         make_admin_session(),
         httponly=True,
-        secure=True,
+        secure=request.secure,
         samesite="Lax",
         max_age=43200,
         path="/",
@@ -625,13 +644,19 @@ form.onsubmit=async event=>{
   event.preventDefault();
   msg.textContent="";
   try{
-    const response=await fetch("/admin/login",{method:"POST",body:new FormData(form)});
+    const response=await fetch("/admin/login",{
+      method:"POST",
+      body:new FormData(form),
+      credentials:"same-origin",
+      redirect:"manual"
+    });
     if(response.ok){
-      location.href="/admin/";
+      location.replace("/admin/");
       return;
     }
-    const data=await response.json().catch(()=>({}));
-    msg.textContent=data.error||"Invalid username or password";
+    const data=await response.json().catch(()=>null);
+    const text=data?.error || await response.text().catch(()=> "");
+    msg.textContent=text||"Invalid username or password";
   }catch(error){
     msg.textContent="Unable to contact the server";
   }
