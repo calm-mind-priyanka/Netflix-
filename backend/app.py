@@ -1,9 +1,11 @@
+import asyncio
 import logging
 import os
 import time
+from collections import OrderedDict
 from pathlib import Path
 
-from aiohttp import ClientSession, web
+from aiohttp import ClientSession, ClientTimeout, web
 
 from .auth import (
     make_admin_session,
@@ -27,6 +29,7 @@ from .config import (
     SITE_SECRET,
     HOST,
     TMDB_API_KEY,
+    TMDB_CACHE_MAX,
     telegram_ready,
 )
 from .database import (
@@ -41,20 +44,26 @@ from .parser import (
     normalize_for_search,
     normalize_query,
     search_title_score,
+    stable_id,
 )
 from .stream import Streamer, create_client
 
 LOGGER = logging.getLogger("streambox")
 BASE = Path(__file__).resolve().parent.parent
 
-META_CACHE = {}
+META_CACHE = OrderedDict()
+TMDB_CACHE_TTL = 86400
+TMDB_SEMAPHORE = None
+TMDB_SESSION = None
 
 # Keep homepage catalog work bounded. The website only needs enough recent
 # media records to build the visible homepage; it must never materialize the
 # entire bot collection in RAM on a small Koyeb instance.
 HOME_DOC_LIMIT = 300
 HOME_TITLE_LIMIT = 100
-HOME_ENRICH_LIMIT = 66
+HOME_ENRICH_LIMIT = 12
+SEARCH_ENRICH_LIMIT = 12
+TITLE_VARIANT_LIMIT = 500
 
 # Maintenance is deliberately kept in memory. The website must not create or
 # modify a collection inside the Auto Filter Bot's MongoDB database.
@@ -85,19 +94,47 @@ async def all_titles(limit=None):
     return await normalize_async(iter_media(projection=projection, limit=bounded))
 
 
+async def _tmdb_session():
+    global TMDB_SESSION, TMDB_SEMAPHORE
+    if TMDB_SESSION is None or TMDB_SESSION.closed:
+        TMDB_SESSION = ClientSession(timeout=ClientTimeout(total=8))
+    if TMDB_SEMAPHORE is None:
+        TMDB_SEMAPHORE = asyncio.Semaphore(2)
+    return TMDB_SESSION, TMDB_SEMAPHORE
+
+
+def _tmdb_cache_get(key):
+    cached = META_CACHE.get(key)
+    if not cached:
+        return None
+    if time.time() - cached[0] >= TMDB_CACHE_TTL:
+        META_CACHE.pop(key, None)
+        return None
+    META_CACHE.move_to_end(key)
+    return cached[1]
+
+
+def _tmdb_cache_put(key, value):
+    META_CACHE[key] = (time.time(), value)
+    META_CACHE.move_to_end(key)
+    while len(META_CACHE) > TMDB_CACHE_MAX:
+        META_CACHE.popitem(last=False)
+
+
 async def tmdb_meta(title, kind, year=None):
     if not TMDB_API_KEY:
         return {}
 
     key = (kind, title.casefold(), year)
-    cached = META_CACHE.get(key)
-    if cached and time.time() - cached[0] < 86400:
-        return cached[1]
+    cached = _tmdb_cache_get(key)
+    if cached is not None:
+        return cached
 
     endpoint = "tv" if kind == "series" else "movie"
     url = f"https://api.themoviedb.org/3/search/{endpoint}"
+    session, semaphore = await _tmdb_session()
     try:
-        async with ClientSession() as session:
+        async with semaphore:
             async with session.get(
                 url,
                 params={
@@ -107,7 +144,6 @@ async def tmdb_meta(title, kind, year=None):
                     **({"year": year} if year and kind == "movie" else {}),
                     **({"first_air_date_year": year} if year and kind == "series" else {}),
                 },
-                timeout=8,
             ) as response:
                 if response.status != 200:
                     return {}
@@ -116,13 +152,12 @@ async def tmdb_meta(title, kind, year=None):
         results = data.get("results") or []
         wanted = normalize_for_search(title)
         result = next(
-            (
-                candidate for candidate in results
-                if normalize_for_search(candidate.get("title") or candidate.get("name")) == wanted
-            ),
+            (candidate for candidate in results
+             if normalize_for_search(candidate.get("title") or candidate.get("name")) == wanted),
             results[0] if results else None,
         )
         if not result:
+            _tmdb_cache_put(key, {})
             return {}
 
         date = result.get("first_air_date") or result.get("release_date") or ""
@@ -139,7 +174,7 @@ async def tmdb_meta(title, kind, year=None):
             "year": int(date[:4]) if date[:4].isdigit() else None,
             "rating": result.get("vote_average"),
         }
-        META_CACHE[key] = (time.time(), output)
+        _tmdb_cache_put(key, output)
         return output
     except Exception:
         LOGGER.exception("TMDB lookup failed for %s", title)
@@ -217,17 +252,35 @@ async def search(request):
         if parsed["episode"] is not None:
             copy["search_episode"] = parsed["episode"]
         selected.append(copy)
-    enriched = [await enrich(item) for item in selected]
+    enriched = []
+    for index, item in enumerate(selected):
+        if index < SEARCH_ENRICH_LIMIT:
+            enriched.append(await enrich(item))
+        else:
+            enriched.append(item)
     return web.json_response({"ok": True, "items": enriched, "count": len(selected)})
 
 
 async def title(request):
     title_id = request.match_info["id"]
-    # Homepage/search responses already contain complete title objects, so this
-    # endpoint is only a fallback. Keep the fallback bounded as well.
+    requested_name = request.query.get("q", "").strip()
+
+    # First try the bounded homepage set. When the browser supplies the title
+    # name, do a targeted MongoDB search so titles outside the homepage window
+    # can still resolve all of their matching file variants.
     for item in await all_titles(limit=HOME_DOC_LIMIT):
         if item["id"] == title_id:
+            if requested_name:
+                break
             return web.json_response({"ok": True, **await enrich(item)})
+
+    if requested_name:
+        docs = await search_media(requested_name, limit=TITLE_VARIANT_LIMIT)
+        grouped = normalize(docs)
+        target = next((item for item in grouped if item["id"] == title_id), None)
+        if target:
+            return web.json_response({"ok": True, **await enrich(target)})
+
     raise web.HTTPNotFound(text="Title not found")
 
 
@@ -471,6 +524,11 @@ async def startup(app):
     app["streamer"] = Streamer(telegram) if telegram else None
     app["telegram_ready"] = telegram is not None
 
+    global TMDB_SESSION, TMDB_SEMAPHORE
+    if TMDB_API_KEY:
+        TMDB_SESSION, TMDB_SEMAPHORE = ClientSession(timeout=ClientTimeout(total=8)), asyncio.Semaphore(2)
+        LOGGER.info("TMDB metadata enrichment enabled with bounded concurrency/cache")
+
     if telegram:
         LOGGER.info("Telegram streaming client started")
     else:
@@ -481,6 +539,12 @@ async def startup(app):
 
 
 async def cleanup(app):
+    global TMDB_SESSION, TMDB_SEMAPHORE
+    if TMDB_SESSION is not None and not TMDB_SESSION.closed:
+        await TMDB_SESSION.close()
+    TMDB_SESSION = None
+    TMDB_SEMAPHORE = None
+
     telegram = app.get("tg")
     if telegram is not None:
         try:
