@@ -254,16 +254,18 @@ def quality_key(value):
     return int(match.group(1)) if match else 9999
 
 
-def normalize(docs):
-    titles = {}
-    order = []
-    for doc in docs:
+class _CatalogBuilder:
+    def __init__(self):
+        self.titles = {}
+        self.order = []
+
+    def add(self, doc):
         parsed = parse_doc(doc)
         if not parsed["file_id"]:
-            continue
+            return
         title_id = stable_id(parsed["title"], parsed["type"])
-        if title_id not in titles:
-            titles[title_id] = {
+        if title_id not in self.titles:
+            self.titles[title_id] = {
                 "id": title_id,
                 "title": parsed["title"],
                 "type": parsed["type"],
@@ -275,11 +277,11 @@ def normalize(docs):
                 "rating": None,
                 "seasons": defaultdict(lambda: defaultdict(list)),
                 "variants": [],
-                "_order": len(order),
+                "_order": len(self.order),
             }
-            order.append(title_id)
+            self.order.append(title_id)
 
-        title = titles[title_id]
+        title = self.titles[title_id]
         if parsed["year"]:
             title["years"].add(parsed["year"])
             if not title["year"]:
@@ -300,32 +302,50 @@ def normalize(docs):
         else:
             title["variants"].append(variant)
 
-    result = []
-    for title_id in order:
-        title = titles[title_id]
-        title["years"] = sorted(title["years"])
-        title["seasons"] = [
-            {
-                "season": int(season),
-                "episodes": [
-                    {
-                        "episode": int(episode),
-                        "variants": sorted(
-                            variants,
-                            key=lambda item: (
-                                quality_key(item["quality"]), item["language"].casefold(), item["file_name"].casefold()
+    def finish(self):
+        result = []
+        for title_id in self.order:
+            title = self.titles[title_id]
+            title["years"] = sorted(title["years"])
+            title["seasons"] = [
+                {
+                    "season": int(season),
+                    "episodes": [
+                        {
+                            "episode": int(episode),
+                            "variants": sorted(
+                                variants,
+                                key=lambda item: (
+                                    quality_key(item["quality"]), item["language"].casefold(), item["file_name"].casefold()
+                                ),
                             ),
-                        ),
-                    }
-                    for episode, variants in sorted(episodes.items())
-                ],
-            }
-            for season, episodes in sorted(title["seasons"].items())
-        ]
-        title["variants"] = sorted(
-            title["variants"],
-            key=lambda item: (quality_key(item["quality"]), item["language"].casefold(), item["file_name"].casefold()),
-        )
-        title.pop("_order", None)
-        result.append(title)
-    return result
+                        }
+                        for episode, variants in sorted(episodes.items())
+                    ],
+                }
+                for season, episodes in sorted(title["seasons"].items())
+            ]
+            title["variants"] = sorted(
+                title["variants"],
+                key=lambda item: (quality_key(item["quality"]), item["language"].casefold(), item["file_name"].casefold()),
+            )
+            title.pop("_order", None)
+            result.append(title)
+        return result
+
+
+def normalize(docs):
+    """Normalize an in-memory iterable of MongoDB documents."""
+    builder = _CatalogBuilder()
+    for doc in docs:
+        builder.add(doc)
+    return builder.finish()
+
+
+async def normalize_async(docs):
+    """Normalize an async MongoDB stream without first materializing all documents."""
+    builder = _CatalogBuilder()
+    async for doc in docs:
+        builder.add(doc)
+    return builder.finish()
+
