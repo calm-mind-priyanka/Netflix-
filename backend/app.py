@@ -35,7 +35,7 @@ from .database import (
     iter_media,
     search_media,
 )
-from .parser import normalize
+from .parser import normalize, normalize_for_search, normalize_query, search_title_score
 from .stream import Streamer, create_client
 
 LOGGER = logging.getLogger("streambox")
@@ -61,9 +61,9 @@ async def all_titles(force=False):
     if not DATABASE_URI:
         raise RuntimeError("DATABASE_URI is not configured")
 
-    docs = []
     projection = {
         "_id": 1,
+        "file_id": 1,
         "file_ref": 1,
         "file_name": 1,
         "file_size": 1,
@@ -71,29 +71,25 @@ async def all_titles(force=False):
         "mime_type": 1,
         "caption": 1,
     }
-    async for doc in iter_media(
-        projection=projection,
-        limit=CATALOG_MAX_DOCS,
-    ):
-        docs.append(doc)
-
+    # Do not cap the catalog here. A capped read can split a title across pages
+    # and make a perfectly valid search result impossible to resolve later.
+    docs = [doc async for doc in iter_media(projection=projection)]
     items = normalize(docs)
     CATALOG_CACHE.update(at=now, items=items)
     return items
 
 
-async def tmdb_meta(title, kind):
+async def tmdb_meta(title, kind, year=None):
     if not TMDB_API_KEY:
         return {}
 
-    key = (kind, title.casefold())
+    key = (kind, title.casefold(), year)
     cached = META_CACHE.get(key)
     if cached and time.time() - cached[0] < 86400:
         return cached[1]
 
     endpoint = "tv" if kind == "series" else "movie"
     url = f"https://api.themoviedb.org/3/search/{endpoint}"
-
     try:
         async with ClientSession() as session:
             async with session.get(
@@ -102,6 +98,8 @@ async def tmdb_meta(title, kind):
                     "api_key": TMDB_API_KEY,
                     "query": title,
                     "include_adult": "false",
+                    **({"year": year} if year and kind == "movie" else {}),
+                    **({"first_air_date_year": year} if year and kind == "series" else {}),
                 },
                 timeout=8,
             ) as response:
@@ -109,7 +107,15 @@ async def tmdb_meta(title, kind):
                     return {}
                 data = await response.json()
 
-        result = (data.get("results") or [None])[0]
+        results = data.get("results") or []
+        wanted = normalize_for_search(title)
+        result = next(
+            (
+                candidate for candidate in results
+                if normalize_for_search(candidate.get("title") or candidate.get("name")) == wanted
+            ),
+            results[0] if results else None,
+        )
         if not result:
             return {}
 
@@ -117,13 +123,11 @@ async def tmdb_meta(title, kind):
         output = {
             "poster": (
                 f"https://image.tmdb.org/t/p/w500{result['poster_path']}"
-                if result.get("poster_path")
-                else None
+                if result.get("poster_path") else None
             ),
             "backdrop": (
                 f"https://image.tmdb.org/t/p/w1280{result['backdrop_path']}"
-                if result.get("backdrop_path")
-                else None
+                if result.get("backdrop_path") else None
             ),
             "description": result.get("overview"),
             "year": int(date[:4]) if date[:4].isdigit() else None,
@@ -137,18 +141,17 @@ async def tmdb_meta(title, kind):
 
 
 async def enrich(title):
-    metadata = await tmdb_meta(title["title"], title["type"])
     output = dict(title)
+    metadata = await tmdb_meta(title["title"], title["type"], title.get("year"))
+    # Never overwrite a poster already attached to a real media record.
     for key, value in metadata.items():
-        if value is not None:
+        if value is not None and (key != "poster" or not output.get("poster")):
             output[key] = value
     return output
 
 
-def _search_score(item, query):
-    terms = [term for term in query.casefold().split() if term]
-    haystack = item["title"].casefold()
-    return sum(term in haystack for term in terms)
+def _search_score(item, query_title):
+    return search_title_score(item["title"], query_title)
 
 
 async def home(request):
@@ -164,17 +167,46 @@ async def search(request):
     if not query:
         return web.json_response({"ok": True, "items": [], "count": 0})
 
-    docs = await search_media(query, limit=150)
-    items = normalize(docs)
+    parsed = normalize_query(query)
+    items = await all_titles()
+    candidates = []
 
-    # A direct database search may match punctuation/filename tokens that were
-    # intentionally removed from the cleaned title. Score title matches first.
-    items.sort(key=lambda item: (-_search_score(item, query), item["title"].casefold()))
+    for item in items:
+        if parsed["year"] is not None:
+            years = set(item.get("years") or [])
+            if item.get("year"):
+                years.add(item["year"])
+            if parsed["year"] not in years:
+                continue
+        if parsed["season"] is not None:
+            if item["type"] != "series" or not any(
+                season["season"] == parsed["season"] for season in item.get("seasons", [])
+            ):
+                continue
+        if parsed["episode"] is not None:
+            if item["type"] != "series" or not any(
+                ep["episode"] == parsed["episode"]
+                for season in item.get("seasons", [])
+                if parsed["season"] is None or season["season"] == parsed["season"]
+                for ep in season.get("episodes", [])
+            ):
+                continue
 
-    enriched = []
-    for item in items[:100]:
-        enriched.append(await enrich(item))
-    return web.json_response({"ok": True, "items": enriched, "count": len(items)})
+        score = _search_score(item, parsed["title"])
+        if score >= 0.72:
+            candidates.append((score, item))
+
+    candidates.sort(key=lambda pair: (-pair[0], pair[1]["title"].casefold()))
+    selected = []
+    for _, item in candidates[:100]:
+        copy = dict(item)
+        if parsed["season"] is not None:
+            copy["search_season"] = parsed["season"]
+        if parsed["episode"] is not None:
+            copy["search_episode"] = parsed["episode"]
+        selected.append(copy)
+    enriched = [await enrich(item) for item in selected]
+    return web.json_response({"ok": True, "items": enriched, "count": len(selected)})
 
 
 async def title(request):
@@ -204,6 +236,17 @@ async def stream(request):
     if streamer is None:
         raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
     return await streamer.stream(request, file_id)
+
+
+async def stream_compatible(request):
+    file_id = request.match_info["file_id"]
+    token_value = request.query.get("token", "")
+    if not validate_stream_token(token_value, file_id):
+        raise web.HTTPForbidden(text="Invalid or expired stream token")
+    streamer = request.app.get("streamer")
+    if streamer is None:
+        raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
+    return await streamer.transcode(request, file_id)
 
 
 async def download(request):
@@ -455,6 +498,7 @@ def create_app():
     app.router.add_get("/api/title/{id}", title)
     app.router.add_get("/api/stream-token/{file_id}", token)
     app.router.add_get("/api/stream/{file_id}", stream)
+    app.router.add_get("/api/stream-compatible/{file_id}", stream_compatible)
     app.router.add_get("/api/download/{file_id}", download)
 
     app.router.add_get("/admin", admin_login)
