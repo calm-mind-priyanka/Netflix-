@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import shutil
+from collections import OrderedDict
 from types import SimpleNamespace
 
 from aiohttp import web
@@ -15,7 +16,7 @@ from pyrogram.errors import AuthBytesInvalid
 from pyrogram.file_id import FileId, FileType, ThumbnailSource
 from pyrogram.session import Session, Auth
 
-from .config import API_ID, API_HASH, BOT_TOKEN, SESSION_NAME
+from .config import API_ID, API_HASH, BOT_TOKEN, SESSION_NAME, TRANSCODE_CONCURRENCY
 from .database import find_media
 
 LOGGER = logging.getLogger("streambox.stream")
@@ -94,12 +95,15 @@ def _build_properties(doc):
 class Streamer:
     def __init__(self, client):
         self.client = client
-        self.cache = {}
+        self.cache = OrderedDict()
+        self.cache_max = 256
+        self.transcode_slots = asyncio.Semaphore(TRANSCODE_CONCURRENCY)
         self.lock = asyncio.Lock()
 
     async def properties(self, file_id):
         key = str(file_id)
         if key in self.cache:
+            self.cache.move_to_end(key)
             return self.cache[key]
 
         doc = await find_media(
@@ -125,6 +129,9 @@ class Streamer:
             ) from exc
 
         self.cache[key] = properties
+        self.cache.move_to_end(key)
+        while len(self.cache) > self.cache_max:
+            self.cache.popitem(last=False)
         return properties
 
     async def media_session(self, file_id):
@@ -246,8 +253,9 @@ class Streamer:
     async def transcode(self, request, file_id):
         """Transcode incompatible Telegram media to browser-friendly fragmented MP4.
 
-        FFmpeg receives bytes directly from Telegram through a pipe; no original
-        Telegram file is changed and no full-library/local media copy is created.
+        FFmpeg receives bytes directly from Telegram through a pipe. Only one
+        compatibility conversion is allowed by default on small instances,
+        preventing concurrent CPU-heavy encodes from taking down the web process.
         """
         if self.client is None:
             raise web.HTTPServiceUnavailable(text="Telegram streaming is not configured")
@@ -255,44 +263,53 @@ class Streamer:
             raise web.HTTPServiceUnavailable(text="FFmpeg is not installed on the streaming server")
 
         properties = await self.properties(file_id)
-        process = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-i", "pipe:0",
-            "-map", "0:v:0?", "-map", "0:a:0?",
-            "-c:v", "libx264", "-preset", "veryfast",
-            "-pix_fmt", "yuv420p", "-profile:v", "main",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
-            "-f", "mp4", "pipe:1",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-
-        response = web.StreamResponse(
-            status=200,
-            headers={
-                "Content-Type": "video/mp4",
-                "Accept-Ranges": "none",
-                "Cache-Control": "private, no-store",
-                "Content-Disposition": "inline; filename=\"stream.mp4\"",
-            },
-        )
-        await response.prepare(request)
-
-        async def feed():
-            try:
-                async for chunk in self._telegram_chunks(properties):
-                    process.stdin.write(chunk)
-                    await process.stdin.drain()
-            finally:
-                try:
-                    process.stdin.close()
-                except Exception:
-                    pass
-
-        feeder = asyncio.create_task(feed())
         try:
+            await asyncio.wait_for(self.transcode_slots.acquire(), timeout=5)
+        except asyncio.TimeoutError as exc:
+            raise web.HTTPServiceUnavailable(
+                text="A compatibility stream is already running. Please try again shortly."
+            ) from exc
+
+        process = None
+        feeder = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-i", "pipe:0",
+                "-map", "0:v:0?", "-map", "0:a:0?",
+                "-c:v", "libx264", "-preset", "ultrafast", "-threads", "1",
+                "-pix_fmt", "yuv420p", "-profile:v", "main",
+                "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+                "-f", "mp4", "pipe:1",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+
+            response = web.StreamResponse(
+                status=200,
+                headers={
+                    "Content-Type": "video/mp4",
+                    "Accept-Ranges": "none",
+                    "Cache-Control": "private, no-store",
+                    "Content-Disposition": "inline; filename=\"stream.mp4\"",
+                },
+            )
+            await response.prepare(request)
+
+            async def feed():
+                try:
+                    async for chunk in self._telegram_chunks(properties):
+                        process.stdin.write(chunk)
+                        await process.stdin.drain()
+                finally:
+                    try:
+                        process.stdin.close()
+                    except Exception:
+                        pass
+
+            feeder = asyncio.create_task(feed())
             while True:
                 data = await process.stdout.read(CHUNK_SIZE)
                 if not data:
@@ -302,26 +319,31 @@ class Streamer:
             code = await process.wait()
             if code != 0:
                 raise RuntimeError(f"FFmpeg exited with status {code}")
-        except (ConnectionResetError, BrokenPipeError):
-            feeder.cancel()
-            try:
-                await process.wait()
-            except Exception:
-                process.kill()
-        except Exception:
-            feeder.cancel()
-            if process.returncode is None:
-                process.kill()
-            await process.wait()
-            LOGGER.exception("Browser compatibility stream failed for file %s", file_id)
-        finally:
-            if not feeder.done():
-                feeder.cancel()
+
             try:
                 await response.write_eof()
             except (ConnectionResetError, BrokenPipeError):
                 pass
-        return response
+            return response
+        except (ConnectionResetError, BrokenPipeError):
+            if feeder is not None:
+                feeder.cancel()
+            if process is not None and process.returncode is None:
+                process.kill()
+            if process is not None:
+                await process.wait()
+            return response if "response" in locals() else None
+        except Exception:
+            if feeder is not None and not feeder.done():
+                feeder.cancel()
+            if process is not None and process.returncode is None:
+                process.kill()
+            if process is not None:
+                await process.wait()
+            LOGGER.exception("Browser compatibility stream failed for file %s", file_id)
+            raise
+        finally:
+            self.transcode_slots.release()
 
     @staticmethod
     def _range(request, size):
