@@ -71,10 +71,10 @@ async def all_titles(force=False):
         "mime_type": 1,
         "caption": 1,
     }
-    # Do not cap the catalog here. A capped read can split a title across pages
-    # and make a perfectly valid search result impossible to resolve later.
-    docs = [doc async for doc in iter_media(projection=projection)]
-    items = normalize(docs)
+    # Stream MongoDB documents directly into the catalog builder. The previous
+    # implementation first materialized the entire collection into a Python list,
+    # which could exhaust a small Koyeb instance before /api/home completed.
+    items = await normalize_async(iter_media(projection=projection))
     CATALOG_CACHE.update(at=now, items=items)
     return items
 
