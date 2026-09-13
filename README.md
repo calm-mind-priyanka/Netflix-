@@ -27,13 +27,9 @@ The website derives movie/series, season, episode, quality and language from the
 
 ## Admin panel
 
-Open `https://YOUR-KOYEB-URL/admin` and sign in with `ADMIN_USERNAME` and the password represented by `ADMIN_PASSWORD_HASH`.
+Open `https://YOUR-KOYEB-URL/admin` and sign in with `ADMIN_USERNAME` and the the password in `ADMIN_PASSWORD`.
 
-Generate a password hash before deployment:
-
-`python tools_hash_password.py`
-
-Copy the printed value into the Koyeb environment variable `ADMIN_PASSWORD_HASH`.
+No password-hashing command is required for this deployment. Keep `ADMIN_PASSWORD` private in Koyeb.
 
 The admin panel can:
 
