@@ -38,9 +38,9 @@ except ValueError:
     CATALOG_TTL = 60
 
 try:
-    CATALOG_MAX_DOCS = max(100, int(_env("CATALOG_MAX_DOCS", "5000")))
+    CATALOG_MAX_DOCS = max(100, int(_env("CATALOG_MAX_DOCS", "300")))
 except ValueError:
-    CATALOG_MAX_DOCS = 5000
+    CATALOG_MAX_DOCS = 300
 
 HOST = _env("HOST", "0.0.0.0")
 try:
