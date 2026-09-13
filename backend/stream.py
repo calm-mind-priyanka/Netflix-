@@ -1,12 +1,93 @@
-import math, mimetypes, secrets, asyncio, base64, struct
+import base64
+import math
+import mimetypes
+import re
+import struct
+import asyncio
+import logging
 from types import SimpleNamespace
+
 from aiohttp import web
 from pyrogram import Client, raw, utils
 from pyrogram.errors import AuthBytesInvalid
 from pyrogram.file_id import FileId, FileType, ThumbnailSource
 from pyrogram.session import Session, Auth
+
 from .config import API_ID, API_HASH, BOT_TOKEN, SESSION_NAME
-from .database import iter_media
+from .database import find_media
+
+LOGGER = logging.getLogger("streambox.stream")
+
+CHUNK_SIZE = 1024 * 1024
+
+def _decode_urlsafe(value):
+    value = str(value or "")
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+def _decode_canonical_file_id(value):
+    """Decode the exact encode_file_id() format used by the Auto Filter Bot."""
+    encoded = _decode_urlsafe(value)
+    unpacked = bytearray()
+    index = 0
+
+    while index < len(encoded):
+        byte = encoded[index]
+        if byte == 0:
+            if index + 1 >= len(encoded):
+                raise ValueError("truncated zero-run")
+            count = encoded[index + 1]
+            if count == 0:
+                raise ValueError("invalid zero-run")
+            unpacked.extend(b"\x00" * count)
+            index += 2
+        else:
+            unpacked.append(byte)
+            index += 1
+
+    if len(unpacked) < 26 or bytes(unpacked[-2:]) != bytes((22, 4)):
+        raise ValueError("not an Auto Filter Bot canonical file id")
+
+    packed = bytes(unpacked[:-2])
+    if len(packed) != struct.calcsize("<iiqq"):
+        raise ValueError("invalid canonical file id length")
+
+    file_type, dc_id, media_id, access_hash = struct.unpack("<iiqq", packed)
+    return file_type, dc_id, media_id, access_hash
+
+def _build_properties(doc):
+    canonical = str(doc.get("_id") or doc.get("file_id") or "")
+    file_ref_text = str(doc.get("file_ref") or "")
+
+    try:
+        file_type, dc_id, media_id, access_hash = _decode_canonical_file_id(canonical)
+        file_reference = _decode_urlsafe(file_ref_text) if file_ref_text else b""
+        return SimpleNamespace(
+            file_type=file_type,
+            dc_id=dc_id,
+            media_id=media_id,
+            access_hash=access_hash,
+            file_reference=file_reference,
+            thumbnail_size="",
+            thumbnail_source=None,
+            chat_id=0,
+            chat_access_hash=0,
+            volume_id=0,
+            local_id=0,
+            file_size=int(doc.get("file_size") or 0),
+            mime_type=str(doc.get("mime_type") or ""),
+            file_name=str(doc.get("file_name") or ""),
+        )
+    except Exception:
+        # Compatibility fallback for a record containing a raw Telegram
+        # file_id. The original Auto Filter Bot stores canonical ids, so this
+        # path is not used for normal records.
+        decoded = FileId.decode(canonical)
+        if file_ref_text:
+            decoded.file_reference = _decode_urlsafe(file_ref_text)
+        decoded.file_size = int(doc.get("file_size") or getattr(decoded, "file_size", 0) or 0)
+        decoded.mime_type = str(doc.get("mime_type") or getattr(decoded, "mime_type", "") or "")
+        decoded.file_name = str(doc.get("file_name") or getattr(decoded, "file_name", "") or "")
+        return decoded
 
 class Streamer:
     def __init__(self, client):
@@ -15,184 +96,274 @@ class Streamer:
         self.lock = asyncio.Lock()
 
     async def properties(self, file_id):
-        if file_id in self.cache:
-            return self.cache[file_id]
-        # The Auto Filter Bot does NOT store a normal Telegram file_id in _id.
-        # It stores a canonical packed id in _id plus file_ref. Decode both forms.
-        doc = None
-        async for d in iter_media({"_id": file_id}, projection={
-            "_id": 1, "file_id": 1, "file_ref": 1, "file_name": 1,
-            "file_size": 1, "mime_type": 1
-        }):
-            doc = d
-            break
-        if doc is None:
-            async for d in iter_media({"file_id": file_id}, projection={
-                "_id": 1, "file_id": 1, "file_ref": 1, "file_name": 1,
-                "file_size": 1, "mime_type": 1
-            }):
-                doc = d
-                break
+        key = str(file_id)
+        if key in self.cache:
+            return self.cache[key]
+
+        doc = await find_media(
+            key,
+            projection={
+                "_id": 1,
+                "file_ref": 1,
+                "file_name": 1,
+                "file_size": 1,
+                "mime_type": 1,
+                "file_type": 1,
+            },
+        )
         if doc is None:
             raise web.HTTPNotFound(text="Media not found in Auto Filter Bot database")
 
-        raw_id = str(doc.get("file_id") or doc.get("_id") or "")
         try:
-            fid = FileId.decode(raw_id)
-        except Exception:
-            try:
-                encoded = base64.urlsafe_b64decode(raw_id + "=" * (-len(raw_id) % 4))
-                # Reverse the Auto Filter Bot's encode_file_id(): runs of zero
-                # bytes are stored as 0,count and two sentinel bytes (22,4)
-                # are appended before base64 encoding.
-                unpacked = bytearray()
-                i = 0
-                while i < len(encoded):
-                    b = encoded[i]
-                    if b == 0:
-                        if i + 1 >= len(encoded):
-                            raise ValueError("truncated zero-run in stored file id")
-                        count = encoded[i + 1]
-                        if count == 0:
-                            raise ValueError("invalid zero-run in stored file id")
-                        unpacked.extend(b"\x00" * count)
-                        i += 2
-                    else:
-                        unpacked.append(b)
-                        i += 1
-                if len(unpacked) < 26 or unpacked[-2:] != bytes([22, 4]):
-                    raise ValueError("invalid Auto Filter Bot file id sentinel")
-                packed = bytes(unpacked[:-2])
-                file_type, dc_id, media_id, access_hash = struct.unpack("<iiqq", packed)
-                file_ref = base64.urlsafe_b64decode(
-                    str(doc.get("file_ref") or "") + "=" * (-len(str(doc.get("file_ref") or "")) % 4)
-                )
-                fid = SimpleNamespace(
-                    file_type=FileType(file_type), dc_id=dc_id, media_id=media_id,
-                    access_hash=access_hash, file_reference=file_ref,
-                    thumbnail_size="", thumbnail_source=ThumbnailSource.THUMBNAIL,
-                    chat_id=0, chat_access_hash=0, volume_id=0, local_id=0,
-                    file_size=int(doc.get("file_size") or 0),
-                    mime_type=doc.get("mime_type") or "",
-                    file_name=doc.get("file_name") or "",
-                )
-            except Exception as e:
-                raise web.HTTPBadRequest(text="Invalid stored Telegram media reference") from e
+            properties = _build_properties(doc)
+        except Exception as exc:
+            LOGGER.exception("Could not decode Telegram media reference for file %s", key)
+            raise web.HTTPBadRequest(
+                text="The stored Telegram media reference could not be decoded"
+            ) from exc
 
-        # DB values are authoritative for the file metadata.
-        fid.file_size = int(doc.get("file_size") or getattr(fid, "file_size", 0) or 0)
-        fid.mime_type = doc.get("mime_type") or getattr(fid, "mime_type", "") or ""
-        fid.file_name = doc.get("file_name") or getattr(fid, "file_name", "") or ""
-        self.cache[file_id] = fid
-        return fid
+        self.cache[key] = properties
+        return properties
 
-    async def media_session(self, fid):
+    async def media_session(self, file_id):
         sessions = self.client.media_sessions
-        if fid.dc_id in sessions:
-            return sessions[fid.dc_id]
-        if fid.dc_id != await self.client.storage.dc_id():
+        if file_id.dc_id in sessions:
+            return sessions[file_id.dc_id]
+
+        if file_id.dc_id != await self.client.storage.dc_id():
             session = Session(
-                self.client, fid.dc_id,
-                await Auth(self.client, fid.dc_id, await self.client.storage.test_mode()).create(),
-                await self.client.storage.test_mode(), is_media=True
+                self.client,
+                file_id.dc_id,
+                await Auth(
+                    self.client,
+                    file_id.dc_id,
+                    await self.client.storage.test_mode(),
+                ).create(),
+                await self.client.storage.test_mode(),
+                is_media=True,
             )
             await session.start()
+
             for _ in range(6):
-                exported = await self.client.invoke(raw.functions.auth.ExportAuthorization(dc_id=fid.dc_id))
+                exported = await self.client.invoke(
+                    raw.functions.auth.ExportAuthorization(dc_id=file_id.dc_id)
+                )
                 try:
-                    await session.send(raw.functions.auth.ImportAuthorization(id=exported.id, bytes=exported.bytes))
+                    await session.send(
+                        raw.functions.auth.ImportAuthorization(
+                            id=exported.id,
+                            bytes=exported.bytes,
+                        )
+                    )
                     break
                 except AuthBytesInvalid:
                     continue
             else:
                 await session.stop()
-                raise AuthBytesInvalid
+                raise AuthBytesInvalid("Unable to import Telegram DC authorization")
         else:
             session = Session(
-                self.client, fid.dc_id, await self.client.storage.auth_key(),
-                await self.client.storage.test_mode(), is_media=True
+                self.client,
+                file_id.dc_id,
+                await self.client.storage.auth_key(),
+                await self.client.storage.test_mode(),
+                is_media=True,
             )
             await session.start()
-        sessions[fid.dc_id] = session
+
+        sessions[file_id.dc_id] = session
         return session
 
     @staticmethod
-    def location(fid):
-        if fid.file_type == FileType.CHAT_PHOTO:
-            if fid.chat_id > 0:
-                peer = raw.types.InputPeerUser(user_id=fid.chat_id, access_hash=fid.chat_access_hash)
-            elif fid.chat_access_hash == 0:
-                peer = raw.types.InputPeerChat(chat_id=-fid.chat_id)
+    def location(file_id):
+        file_type = int(file_id.file_type)
+
+        if file_type == int(FileType.CHAT_PHOTO):
+            if file_id.chat_id > 0:
+                peer = raw.types.InputPeerUser(
+                    user_id=file_id.chat_id,
+                    access_hash=file_id.chat_access_hash,
+                )
+            elif file_id.chat_access_hash == 0:
+                peer = raw.types.InputPeerChat(chat_id=-file_id.chat_id)
             else:
                 peer = raw.types.InputPeerChannel(
-                    channel_id=utils.get_channel_id(fid.chat_id), access_hash=fid.chat_access_hash
+                    channel_id=utils.get_channel_id(file_id.chat_id),
+                    access_hash=file_id.chat_access_hash,
                 )
             return raw.types.InputPeerPhotoFileLocation(
-                peer=peer, volume_id=fid.volume_id, local_id=fid.local_id,
-                big=fid.thumbnail_source == ThumbnailSource.CHAT_PHOTO_BIG
+                peer=peer,
+                volume_id=file_id.volume_id,
+                local_id=file_id.local_id,
+                big=False,
             )
-        if fid.file_type == FileType.PHOTO:
+
+        if file_type == int(FileType.PHOTO):
             return raw.types.InputPhotoFileLocation(
-                id=fid.media_id, access_hash=fid.access_hash,
-                file_reference=fid.file_reference, thumb_size=fid.thumbnail_size
+                id=file_id.media_id,
+                access_hash=file_id.access_hash,
+                file_reference=file_id.file_reference,
+                thumb_size=file_id.thumbnail_size,
             )
+
         return raw.types.InputDocumentFileLocation(
-            id=fid.media_id, access_hash=fid.access_hash,
-            file_reference=fid.file_reference, thumb_size=fid.thumbnail_size
+            id=file_id.media_id,
+            access_hash=file_id.access_hash,
+            file_reference=file_id.file_reference,
+            thumb_size=file_id.thumbnail_size,
         )
 
+    @staticmethod
+    def _range(request, size):
+        header = request.headers.get("Range")
+        if not header:
+            return 0, size - 1, False
+
+        match = re.fullmatch(r"bytes=(\d*)-(\d*)", header.strip())
+        if not match:
+            raise web.HTTPRequestRangeNotSatisfiable(
+                headers={"Content-Range": f"bytes */{size}"}
+            )
+
+        start_text, end_text = match.groups()
+        if not start_text:
+            length = int(end_text or 0)
+            if length <= 0:
+                raise web.HTTPRequestRangeNotSatisfiable(
+                    headers={"Content-Range": f"bytes */{size}"}
+                )
+            start = max(0, size - length)
+            end = size - 1
+        else:
+            start = int(start_text)
+            end = int(end_text) if end_text else size - 1
+
+        if start >= size or start < 0 or end < start:
+            raise web.HTTPRequestRangeNotSatisfiable(
+                headers={"Content-Range": f"bytes */{size}"}
+            )
+
+        return start, min(end, size - 1), True
+
     async def stream(self, request, file_id, attachment=False):
-        fid = await self.properties(file_id)
-        size = int(fid.file_size)
+        if self.client is None:
+            raise web.HTTPServiceUnavailable(text="Telegram streaming is not configured")
+
+        properties = await self.properties(file_id)
+        size = int(properties.file_size)
         if size <= 0:
-            raise web.HTTPInternalServerError(text="Stored media has no valid file size")
-        rng = request.http_range
-        start = int(rng.start) if rng and rng.start is not None else 0
-        stop = int(rng.stop) if rng and rng.stop is not None else size
-        if start < 0 or start >= size or stop <= start:
-            raise web.HTTPRequestRangeNotSatisfiable(headers={"Content-Range": f"bytes */{size}"})
-        stop = min(stop, size)
-        chunk = 1024 * 1024
-        offset = start - (start % chunk)
-        first = start - offset
-        last = (stop - 1) % chunk + 1
-        count = math.ceil(stop / chunk) - math.floor(offset / chunk)
-        session = await self.media_session(fid)
-        location = self.location(fid)
+            raise web.HTTPInternalServerError(
+                text="Stored media has no valid file size"
+            )
 
-        async def body():
-            current = 1
-            while current <= count:
-                r = await session.send(raw.functions.upload.GetFile(location=location, offset=offset, limit=chunk))
-                if not isinstance(r, raw.types.upload.File) or not r.bytes:
+        start, end, partial = self._range(request, size)
+        total = end - start + 1
+
+        # Telegram file offsets must be aligned to the chunk boundary used by
+        # the downloader. The Auto Filter Bot uses the same 1 MiB strategy.
+        offset = (start // CHUNK_SIZE) * CHUNK_SIZE
+        first_cut = start - offset
+        part_count = math.ceil((end + 1) / CHUNK_SIZE) - (offset // CHUNK_SIZE)
+
+        session = await self.media_session(properties)
+        location = self.location(properties)
+
+        async def write_body(response):
+            current_part = 1
+            current_offset = offset
+            remaining = total
+
+            while current_part <= part_count and remaining > 0:
+                result = await session.send(
+                    raw.functions.upload.GetFile(
+                        location=location,
+                        offset=current_offset,
+                        limit=CHUNK_SIZE,
+                    )
+                )
+
+                if not isinstance(result, raw.types.upload.File):
+                    raise RuntimeError(
+                        f"Telegram returned unsupported media response: {type(result).__name__}"
+                    )
+
+                data = result.bytes or b""
+                if not data:
                     break
-                data = r.bytes
-                if count == 1:
-                    yield data[first:last]
-                elif current == 1:
-                    yield data[first:]
-                elif current == count:
-                    yield data[:last]
-                else:
-                    yield data
-                current += 1
-                offset += chunk
 
-        mime = fid.mime_type or mimetypes.guess_type(fid.file_name or "")[0] or "video/mp4"
-        headers = {
-            "Content-Type": mime,
-            "Content-Range": f"bytes {start}-{stop-1}/{size}",
-            "Content-Length": str(stop-start),
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "private, max-age=30",
-            "Content-Disposition": f'{"attachment" if attachment else "inline"}; filename="{fid.file_name or secrets.token_hex(4)}"',
-        }
-        return web.Response(status=206 if request.headers.get("Range") else 200, body=body(), headers=headers)
+                if current_part == 1:
+                    data = data[first_cut:]
+
+                data = data[:remaining]
+                if not data:
+                    break
+
+                await response.write(data)
+                remaining -= len(data)
+                current_offset += CHUNK_SIZE
+                current_part += 1
+
+        mime = (
+            properties.mime_type
+            or mimetypes.guess_type(properties.file_name or "")[0]
+            or "application/octet-stream"
+        )
+
+        safe_name = re.sub(r'[\r\n"]+', "_", properties.file_name or "stream")
+        response = web.StreamResponse(
+            status=206 if partial else 200,
+            headers={
+                "Content-Type": mime,
+                "Content-Length": str(total),
+                "Accept-Ranges": "bytes",
+                "Cache-Control": "private, max-age=30",
+                "Content-Disposition": (
+                    f'{"attachment" if attachment else "inline"}; '
+                    f'filename="{safe_name}"'
+                ),
+            },
+        )
+        if partial:
+            response.headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+
+        await response.prepare(request)
+        try:
+            await write_body(response)
+        except (ConnectionResetError, BrokenPipeError):
+            return response
+        except Exception:
+            LOGGER.exception("Telegram streaming failed for file %s", file_id)
+            if not response.prepared:
+                raise
+            # The response has already started, so the useful information is in
+            # the server log rather than an invalid JSON response mid-stream.
+        finally:
+            try:
+                await response.write_eof()
+            except (ConnectionResetError, BrokenPipeError):
+                pass
+
+        return response
 
 async def create_client():
-    c = Client(
-        SESSION_NAME, api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN,
-        no_updates=True, in_memory=True
+    if not (BOT_TOKEN and API_ID and API_HASH):
+        return None
+
+    client = Client(
+        SESSION_NAME,
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN,
+        no_updates=True,
+        in_memory=True,
     )
-    await c.start()
-    return c
+    try:
+        await client.start()
+    except Exception:
+        LOGGER.exception("Telegram client startup failed")
+        try:
+            await client.stop()
+        except Exception:
+            pass
+        return None
+    return client
