@@ -131,7 +131,11 @@ def create_app():
     app.router.add_get("/health",health)
     app.router.add_get("/api/home",home);app.router.add_get("/api/search",search);app.router.add_get("/api/title/{id}",title);app.router.add_get("/api/stream-token/{file_id}",token);app.router.add_get("/api/stream/{file_id}",stream);app.router.add_get("/api/download/{file_id}",download)
     app.router.add_get("/admin",admin_login);app.router.add_post("/admin/login",admin_login);app.router.add_post("/admin/logout",admin_logout);app.router.add_get("/admin/api/status",admin_status);app.router.add_post("/admin/api/maintenance",admin_toggle_maintenance);app.router.add_post("/admin/api/refresh",admin_refresh)
-    app.router.add_static("/",BASE/"frontend",show_index=True);app.router.add_static("/admin/",BASE/"admin",show_index=True)
+    async def frontend_index(request):
+        return web.FileResponse(BASE/"frontend"/"index.html")
+    app.router.add_get("/",frontend_index)
+    app.router.add_static("/",BASE/"frontend",show_index=False)
+    app.router.add_static("/admin/",BASE/"admin",show_index=True)
     app.on_startup.append(startup);app.on_cleanup.append(cleanup);return app
 
 ADMIN_HTML='''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin Login</title><style>body{margin:0;background:#080808;color:#fff;font:16px system-ui;display:grid;place-items:center;min-height:100vh}.box{width:min(380px,90vw);padding:28px;background:#151515;border-radius:18px}input,button{width:100%;box-sizing:border-box;padding:13px;margin-top:10px;border-radius:10px;border:1px solid #333;background:#0d0d0d;color:#fff}button{background:#fff;color:#000;font-weight:700;cursor:pointer}#msg{margin-top:12px;color:#f88}</style></head><body><div class="box"><h1>Website Admin</h1><form id="f"><input name="username" placeholder="Username" required><input name="password" type="password" placeholder="Password" required><button>Sign in</button></form><div id="msg"></div></div><script>f.onsubmit=async e=>{e.preventDefault();let r=await fetch('/admin/login',{method:'POST',body:new FormData(f)});if(r.ok)location.href='/admin/';else msg.textContent='Invalid credentials';}</script></body></html>'''
