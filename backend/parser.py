@@ -45,6 +45,10 @@ TECH_RE = re.compile(
     r"MKV|MP4|AVI|MOV|TS|10bit|HDR10(?:\+)?|DV|DOLBY(?:\s+VISION)?)(?!\w)",
     re.I,
 )
+SOURCE_RE = re.compile(
+    r"(?<!\w)(WEB[- .]?DL|WEBRip|BluRay|BRRip|BDRip|HDRip|HDTV|DVDRip|HDTC|HDTS|WEB[- .]?CAM|CAMRip|HDCAM|CAM|PreDB|Pre[- .]?DVD|WEB|REMUX)(?!\w)",
+    re.I,
+)
 AUDIO_RE = re.compile(
     r"(?<!\w)(dual\s+audio|multi\s+audio|original\s+audio|AAC(?:\s*[0-9]+(?:(?:\s*[.]\s*|\s+)[0-9]+)?)?|"
     r"AC3|EAC3|DDP?(?:\s*[0-9]+(?:(?:\s*[.]\s*|\s+)[0-9]+)?)?|DD\+|DTS(?:[- .]?HD)?|Atmos)(?!\w)",
@@ -116,6 +120,9 @@ def parse_doc(doc):
     ym = YEAR_RE.search(source)
     languages = _extract_languages(source)
     audio = _extract_audio(source)
+    source_match = SOURCE_RE.search(source)
+    source_name = re.sub(r"[-. ]+", "-", source_match.group(1).strip()).upper() if source_match else "Unknown"
+    source_name = {"WEB-DL": "WEB-DL", "WEBRIP": "WEBRip", "BLURAY": "BluRay", "BRRIP": "BRRip", "BDRIP": "BDRip", "HDRIP": "HDRip", "HDTV": "HDTV", "DVDRIP": "DVDRip", "HDTC": "HDTC", "HDTS": "HDTS", "WEB-CAM": "WEB-CAM", "CAMRIP": "CAMRip", "HDCAM": "HDCAM", "CAM": "CAM", "PREDB": "PreDB", "PRE-DVD": "Pre-DVD", "WEB": "WEB", "REMUX": "REMUX"}.get(source_name, source_name)
     # Filename/caption language tags are treated as spoken-audio languages by
     # default. Subtitle languages are only inferred when the source explicitly
     # marks them as subtitles (sub/subs/subbed/esub). Actual embedded tracks are
@@ -142,6 +149,7 @@ def parse_doc(doc):
         "season": season,
         "episode": episode,
         "quality": qm.group(1).upper() if qm else "Auto",
+        "source": source_name,
         "language": language,  # legacy field kept for old clients
         "languages": languages or ["Unknown"],  # legacy field
         "audio_languages": audio_languages,
@@ -330,7 +338,7 @@ class _CatalogBuilder:
             key: parsed[key]
             for key in (
                 "file_id", "file_ref", "file_name", "file_size", "file_type", "mime_type",
-                "quality", "language", "languages", "audio_languages", "subtitle_languages", "audio", "codec", "caption", "season", "episode", "year",
+                "quality", "source", "language", "languages", "audio_languages", "subtitle_languages", "audio", "codec", "caption", "season", "episode", "year",
             )
         }
 
