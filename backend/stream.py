@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import shutil
+import json
 from collections import OrderedDict
 from types import SimpleNamespace
 
@@ -99,6 +100,9 @@ class Streamer:
         self.cache_max = 256
         self.transcode_slots = asyncio.Semaphore(TRANSCODE_CONCURRENCY)
         self.lock = asyncio.Lock()
+        self.track_cache = OrderedDict()
+        self.track_cache_max = 96
+        self.track_slots = asyncio.Semaphore(1)
 
     async def properties(self, file_id):
         key = str(file_id)
@@ -250,6 +254,157 @@ class Streamer:
             if len(data) < CHUNK_SIZE:
                 break
 
+    @staticmethod
+    def _pretty_language(code, title=None):
+        mapping = {
+            "eng":"English", "hin":"Hindi", "tam":"Tamil", "tel":"Telugu",
+            "mal":"Malayalam", "kan":"Kannada", "ben":"Bengali", "mar":"Marathi",
+            "pun":"Punjabi", "guj":"Gujarati", "bho":"Bhojpuri", "urd":"Urdu",
+            "kor":"Korean", "jpn":"Japanese", "spa":"Spanish", "fra":"French",
+            "deu":"German", "ger":"German", "ita":"Italian", "por":"Portuguese",
+            "rus":"Russian", "ara":"Arabic", "zho":"Chinese", "chi":"Chinese",
+        }
+        value = str(title or "").strip()
+        if value:
+            return value
+        code = str(code or "").strip().lower()
+        return mapping.get(code, code.upper() if code else "Unknown")
+
+    async def probe_tracks(self, file_id):
+        """Read actual embedded audio/subtitle track metadata on demand.
+
+        Only a bounded prefix is sent to ffprobe. This keeps the Hobby instance
+        from downloading an entire movie merely to discover its track list.
+        Results are cached in-process and MongoDB is never modified.
+        """
+        key = str(file_id)
+        cached = self.track_cache.get(key)
+        if cached is not None:
+            self.track_cache.move_to_end(key)
+            return cached
+        if shutil.which("ffprobe") is None:
+            return {"audio_tracks": [], "subtitle_tracks": [], "available": False}
+
+        properties = await self.properties(key)
+        try:
+            await asyncio.wait_for(self.track_slots.acquire(), timeout=5)
+        except asyncio.TimeoutError:
+            return {"audio_tracks": [], "subtitle_tracks": [], "available": False, "busy": True}
+
+        process = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "ffprobe", "-hide_banner", "-loglevel", "error",
+                "-probesize", "16000000", "-analyzeduration", "5000000",
+                "-show_entries", "stream=index,codec_type:stream_tags=language,title,handler_name",
+                "-of", "json", "-i", "pipe:0",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            sent = 0
+            max_probe = 16 * 1024 * 1024
+            async for chunk in self._telegram_chunks(properties):
+                if sent >= max_probe:
+                    break
+                chunk = chunk[:max_probe-sent]
+                process.stdin.write(chunk)
+                await process.stdin.drain()
+                sent += len(chunk)
+                # Containers normally expose stream headers very early. Give
+                # ffprobe enough bytes for headers, but never consume a movie.
+                if sent >= 8 * 1024 * 1024:
+                    try:
+                        if process.returncode is not None:
+                            break
+                    except Exception:
+                        pass
+            try:
+                process.stdin.close()
+            except Exception:
+                pass
+            try:
+                raw = await asyncio.wait_for(process.stdout.read(), timeout=8)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                return {"audio_tracks": [], "subtitle_tracks": [], "available": False}
+            await process.wait()
+            data = json.loads(raw.decode("utf-8", "replace") or "{}")
+            audio_tracks, subtitle_tracks = [], []
+            audio_no, subtitle_no = 0, 0
+            for stream in data.get("streams") or []:
+                typ = stream.get("codec_type")
+                tags = stream.get("tags") or {}
+                language = self._pretty_language(tags.get("language"), tags.get("title") or tags.get("handler_name"))
+                item = {
+                    "index": int(stream.get("index", -1)),
+                    "language": language,
+                    "title": str(tags.get("title") or tags.get("handler_name") or "").strip(),
+                }
+                if typ == "audio":
+                    item["track"] = audio_no
+                    audio_tracks.append(item)
+                    audio_no += 1
+                elif typ == "subtitle":
+                    item["track"] = subtitle_no
+                    subtitle_tracks.append(item)
+                    subtitle_no += 1
+            result = {"audio_tracks": audio_tracks, "subtitle_tracks": subtitle_tracks, "available": True}
+            self.track_cache[key] = result
+            self.track_cache.move_to_end(key)
+            while len(self.track_cache) > self.track_cache_max:
+                self.track_cache.popitem(last=False)
+            return result
+        except Exception:
+            LOGGER.exception("Embedded track probe failed for file %s", key)
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+            return {"audio_tracks": [], "subtitle_tracks": [], "available": False}
+        finally:
+            self.track_slots.release()
+
+    async def subtitle(self, request, file_id):
+        """Extract one embedded subtitle track as WebVTT on demand."""
+        if self.client is None or shutil.which("ffmpeg") is None:
+            raise web.HTTPServiceUnavailable(text="Subtitle extraction is not available")
+        track = request.query.get("subtitle_track")
+        if not str(track or "").isdigit():
+            raise web.HTTPBadRequest(text="A valid subtitle track is required")
+        token = request.query.get("token", "")
+        input_url = f"http://127.0.0.1:{os.getenv('PORT', '8080')}/api/stream/{file_id}?token={token}"
+        try:
+            await asyncio.wait_for(self.track_slots.acquire(), timeout=5)
+        except asyncio.TimeoutError as exc:
+            raise web.HTTPServiceUnavailable(text="Subtitle extraction is busy. Please try again shortly.") from exc
+        process = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-i", input_url,
+                "-map", f"0:s:{int(track)}?",
+                "-c:s", "webvtt", "-f", "webvtt", "pipe:1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            data = await asyncio.wait_for(process.stdout.read(), timeout=45)
+            code = await process.wait()
+            if code != 0 or not data:
+                raise web.HTTPBadRequest(text="This subtitle track could not be converted for the browser")
+            return web.Response(
+                body=data,
+                content_type="text/vtt",
+                headers={"Cache-Control": "private, max-age=300"},
+            )
+        except asyncio.TimeoutError as exc:
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise web.HTTPGatewayTimeout(text="Subtitle extraction timed out") from exc
+        finally:
+            self.track_slots.release()
+
     async def transcode(self, request, file_id):
         """Transcode incompatible Telegram media to browser-friendly fragmented MP4.
 
@@ -273,16 +428,26 @@ class Streamer:
         process = None
         feeder = None
         try:
-            process = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-i", "pipe:0",
-                "-map", "0:v:0?", "-map", "0:a:0?",
+            audio_track = request.query.get("audio_track")
+            start = max(0.0, float(request.query.get("start", "0") or 0))
+            token = request.query.get("token", "")
+            input_url = f"http://127.0.0.1:{os.getenv('PORT', '8080')}/api/stream/{file_id}?token={token}"
+            map_audio = "0:a:0?"
+            if audio_track is not None and str(audio_track).isdigit():
+                map_audio = f"0:a:{int(audio_track)}?"
+            args = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+            if start > 0:
+                args += ["-ss", f"{start:.3f}"]
+            args += ["-i", input_url,
+                "-map", "0:v:0?", "-map", map_audio,
                 "-c:v", "libx264", "-preset", "ultrafast", "-threads", "1",
                 "-pix_fmt", "yuv420p", "-profile:v", "main",
                 "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
-                "-f", "mp4", "pipe:1",
-                stdin=asyncio.subprocess.PIPE,
+                "-f", "mp4", "pipe:1"]
+            process = await asyncio.create_subprocess_exec(
+                *args,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -298,24 +463,11 @@ class Streamer:
             )
             await response.prepare(request)
 
-            async def feed():
-                try:
-                    async for chunk in self._telegram_chunks(properties):
-                        process.stdin.write(chunk)
-                        await process.stdin.drain()
-                finally:
-                    try:
-                        process.stdin.close()
-                    except Exception:
-                        pass
-
-            feeder = asyncio.create_task(feed())
             while True:
                 data = await process.stdout.read(CHUNK_SIZE)
                 if not data:
                     break
                 await response.write(data)
-            await feeder
             code = await process.wait()
             if code != 0:
                 raise RuntimeError(f"FFmpeg exited with status {code}")
