@@ -236,10 +236,10 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
 
       $("#detailBody").innerHTML=html;
 
-      $("#detailBody").querySelectorAll("[data-movie-quality]").forEach(button=>button.onclick=()=>Player.open(title.id,title.title,variants,null).then(()=>Player.choose("quality",button.dataset.movieQuality)));
-      $("#detailBody").querySelectorAll("[data-movie-audio]").forEach(button=>button.onclick=()=>Player.open(title.id,title.title,variants,null).then(()=>Player.choose("audio",button.dataset.movieAudio)));
-      $("#detailBody").querySelectorAll("[data-movie-subtitle]").forEach(button=>button.onclick=()=>Player.open(title.id,title.title,variants,null).then(()=>Player.choose("subtitle",button.dataset.movieSubtitle)));
-      $("#playMovie").onclick=()=>Player.open(title.id,title.title,variants,null);
+      $("#detailBody").querySelectorAll("[data-movie-quality]").forEach(button=>button.onclick=()=>Player.open(title.id,title.title,variants,null,{title:title.title,type:title.type}).then(()=>Player.choose("quality",button.dataset.movieQuality)));
+      $("#detailBody").querySelectorAll("[data-movie-audio]").forEach(button=>button.onclick=()=>Player.open(title.id,title.title,variants,null,{title:title.title,type:title.type}).then(()=>Player.choose("audio",button.dataset.movieAudio)));
+      $("#detailBody").querySelectorAll("[data-movie-subtitle]").forEach(button=>button.onclick=()=>Player.open(title.id,title.title,variants,null,{title:title.title,type:title.type}).then(()=>Player.choose("subtitle",button.dataset.movieSubtitle)));
+      $("#playMovie").onclick=()=>Player.open(title.id,title.title,variants,null,{title:title.title,type:title.type});
       return;
     }
 
@@ -362,7 +362,8 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
           title.id,
           `${title.title} • S${String(seasonNumber).padStart(2,"0")} E${String(episodeNumber).padStart(2,"0")}`,
           episode?.variants||[],
-          next
+          next,
+          {title:title.title,type:"series",season:seasonNumber,episode:episodeNumber}
         );
       });
 
