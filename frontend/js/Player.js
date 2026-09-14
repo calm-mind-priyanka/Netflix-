@@ -10,14 +10,11 @@ const Player={
     this.titleType=context.type||"movie";
     this.season=context.season??null;
     this.episode=context.episode??null;
+    // Keep only the files already supplied for the item being opened.
+    // Other variants are intentionally NOT loaded here. They are resolved
+    // from MongoDB only after the user clicks a setting choice.
     this.variants=Array.isArray(variants)?variants.filter(v=>v?.file_id):[];
     this.allVariants=[...this.variants];
-    if(this.titleType==="series"){
-      try{
-        const expanded=await API.get("/api/title/"+encodeURIComponent(this.titleId)+"?q="+encodeURIComponent(this.titleName));
-        this.allVariants=(expanded?.seasons||[]).flatMap(s=>(s.episodes||[]).flatMap(e=>e.variants||[])).filter(v=>v?.file_id);
-      }catch(_){}
-    }
     this.current={label,next};
     this.variant=null; this.audio=null; this.audioTrack=null; this.subtitle=null; this.subtitleTrack=null; this.quality=null; this.source=null;
     this.tracks={audio_tracks:[],subtitle_tracks:[]}; this.menuSection=null;
@@ -57,29 +54,42 @@ const Player={
   },
   variantAudio(v){return Array.isArray(v?.audio_languages)?v.audio_languages.filter(Boolean):[]},
   variantSubs(v){return Array.isArray(v?.subtitle_languages)?v.subtitle_languages.filter(Boolean):[]},
-  allAudioLanguages(){return [...new Set(this.variants.flatMap(v=>this.variantAudio(v)))].filter(x=>x&&x!=="Unknown").sort((a,b)=>a.localeCompare(b))},
-  allSubtitles(){return [...new Set(this.variants.flatMap(v=>this.variantSubs(v)))].filter(x=>x&&x!=="Unknown").sort((a,b)=>a.localeCompare(b))},
-  allQualities(){return [...new Set(this.variants.map(v=>v.quality).filter(Boolean))].sort((a,b)=>(Number(String(a).match(/\d+/)?.[0]||9999)-Number(String(b).match(/\d+/)?.[0]||9999)))},
-  allSources(){return [...new Set(this.variants.map(v=>v.source).filter(x=>x&&x!=="Unknown"))].sort((a,b)=>a.localeCompare(b))},
-  allSeasons(){return [...new Set(this.allVariants.map(v=>v.season).filter(Number.isFinite))].sort((a,b)=>a-b)},
-  episodesForSeason(season){
-    return [...new Set(this.allVariants.filter(v=>v.season===season).map(v=>v.episode).filter(Number.isFinite))].sort((a,b)=>a-b);
-  },
+
+  // These are UI choices, not database results. The site does not query the
+  // database to build these lists. A click on one of them triggers /api/resolve.
+  languageChoices(){return [
+    "Hindi","Tamil","English","Telugu","Malayalam","Kannada","Bengali","Bangla",
+    "Marathi","Punjabi","Gujarati","Bhojpuri","Korean","Spanish","French",
+    "German","Chinese","Japanese","Urdu"
+  ]},
+  qualityChoices(){return ["360p","480p","720p","1080p","1440p","2160p"]},
+  sourceChoices(){return [
+    "WEB-DL","WEBRip","BluRay","BRRip","BDRip","HDRip","HDTV","DVDRip",
+    "HDTC","HDTS","WEB-CAM","CAMRip","HDCAM","CAM","PreDB","Pre-DVD","WEB","REMUX"
+  ]},
+  seasonChoices(){return Array.from({length:20},(_,i)=>i+1)},
+  episodeChoices(){return Array.from({length:50},(_,i)=>i+1)},
+  allAudioLanguages(){return this.languageChoices()},
+  allSubtitles(){return [...new Set((this.tracks.subtitle_tracks||[]).map(t=>t.language).filter(x=>x&&x!=="Unknown"))]},
+  allQualities(){return this.qualityChoices()},
+  allSources(){return this.sourceChoices()},
+  allSeasons(){return this.seasonChoices()},
+  episodesForSeason(_season){return this.episodeChoices()},
 
   render(){
-    const audio=[...new Set([...this.allAudioLanguages(),...(this.tracks.audio_tracks||[]).map(t=>t.language).filter(x=>x&&x!=="Unknown")])];
-    const subs=[...new Set([...this.allSubtitles(),...(this.tracks.subtitle_tracks||[]).map(t=>t.language).filter(x=>x&&x!=="Unknown")])];
+    const audio=this.allAudioLanguages();
+    const subs=this.allSubtitles();
     const embeddedAudio=(this.tracks.audio_tracks||[]).map(t=>t.language).filter(x=>x&&x!=="Unknown");
     const embeddedSubs=(this.tracks.subtitle_tracks||[]).map(t=>t.language).filter(x=>x&&x!=="Unknown");
     const qualities=this.allQualities(), sources=this.allSources(), seasons=this.allSeasons();
     const section=(key,label,values,current,formatter=x=>x)=>!values.length?"":`<button class="settingRow" data-setting-section="${key}"><span><b>${label}</b><small>${playerEscape(current??"Not selected")}</small></span><span>›</span></button><div class="settingSubmenu ${this.menuSection===key?"":"hidden"}">${values.map(v=>`<button class="settingOption ${String(v)===String(current)?"active":""}" data-player-${key}="${playerEscape(v)}"><span>${playerEscape(formatter(v))}</span>${String(v)===String(current)?"✓":""}</button>`).join("")}</div>`;
 
     let html=`<div class="settingsHead"><h3>Player settings</h3><button id="closeSettings" aria-label="Close settings">×</button></div>`;
-    html+=section("audio","Audio / Language",audio,this.audio);
+    html+=section("audio","Language / Audio",audio,this.audio);
     html+=section("quality","Quality",qualities,this.quality);
-    html+=section("source","Source",sources,this.source);
+    html+=section("source","Source / Release",sources,this.source);
     if(this.titleType==="series") html+=section("season","Season",seasons,this.season,v=>`S${String(v).padStart(2,"0")}`);
-    if(this.titleType==="series" && this.season!=null) html+=section("episode","Episode",this.episodesForSeason(this.season),this.episode,v=>`E${String(v).padStart(2,"0")}`);
+    if(this.titleType==="series") html+=section("episode","Episode",this.episodesForSeason(this.season),this.episode,v=>`E${String(v).padStart(2,"0")}`);
     if(embeddedAudio.length) html+=section("audioTrack","Audio Track",embeddedAudio,this.audioTrack);
     if(embeddedSubs.length) html+=section("subtitleTrack","Subtitle Track",embeddedSubs,this.subtitleTrack);
     if(subs.length) html+=section("subtitle","Subtitle",subs,this.subtitle);
@@ -168,14 +178,7 @@ const Player={
     const oldState={audio:this.audio,audioTrack:this.audioTrack,subtitleTrack:this.subtitleTrack,quality:this.quality,source:this.source,season:this.season,episode:this.episode,subtitle:this.subtitle,variant:this.variant};
     this.switchBusy=true; this.menuSection=null;
     try{
-      if(key==="season"){
-        this.season=Number(value); this.episode=null;
-        this.variants=this.allVariants.filter(v=>v.season===this.season);
-        if(!this.variants.length)throw new Error("That season is not available.");
-        this.render();
-        document.getElementById("menu").classList.remove("hidden");
-        return;
-      }else if(key==="audioTrack"){
+      if(key==="audioTrack"){
         await this.selectEmbeddedAudio(value,position,playing);
       }else if(key==="subtitleTrack"){
         await this.selectEmbeddedSubtitle(value);
@@ -187,12 +190,8 @@ const Player={
         if(key==="audio")this.audio=String(value);
         if(key==="quality")this.quality=String(value);
         if(key==="source")this.source=String(value);
-        if(key==="season"){this.season=Number(value);this.episode=null}
-        if(key==="episode"){
-          this.episode=Number(value);
-          this.variants=this.allVariants.filter(v=>v.season===this.season&&v.episode===this.episode);
-          if(!this.variants.length)throw new Error("That episode is not available.");
-        }
+        if(key==="season")this.season=Number(value);
+        if(key==="episode")this.episode=Number(value);
         await this.switchResolved(position,playing);
       }
       document.getElementById("menu").classList.add("hidden");
@@ -205,10 +204,10 @@ const Player={
 
   async switchResolved(position,playing){
     const file=await this.resolveExact();
-    // Refresh the local variant list only with a real file returned by the resolver.
-    const existing=this.variants.find(v=>v.file_id===file.file_id);
-    if(existing)this.variant=existing;
-    else {this.variants=[...this.variants,file];this.allVariants=[...this.allVariants,file];this.variant=file}
+    // The resolver returns one real database file only after the click.
+    // Keep it as the current playback target; do not build a variant catalog.
+    this.variant=file;
+    this.variants=[file];
     await this.select(file,position,playing);
     await this.loadTracks(file);
     this.render();
