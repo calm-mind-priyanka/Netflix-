@@ -321,7 +321,19 @@ async def resolve(request):
     except ValueError as exc:
         raise web.HTTPBadRequest(text="Invalid season or episode") from exc
 
-    docs = await search_media_by_title(title_name, limit=TITLE_VARIANT_LIMIT)
+    # Search the same existing Auto Filter Bot MongoDB records used by the
+    # website search bar, but make the clicked settings part of the DB query.
+    # This avoids relying on the first N records for a title when a title has
+    # many releases and makes a setting click behave like a real search.
+    search_terms = [title_name]
+    for value in (wanted_audio, wanted_subtitle, wanted_quality, wanted_source):
+        if value and value.lower() not in {"auto", "unknown"}:
+            search_terms.append(value)
+    if season is not None:
+        search_terms.append(f"S{season:02d}")
+    if episode is not None:
+        search_terms.append(f"E{episode:02d}")
+    docs = await search_media(" ".join(search_terms), limit=TITLE_VARIANT_LIMIT)
     parsed = [parse_doc(doc) for doc in docs if doc.get("_id") is not None or doc.get("file_id")]
     candidates = []
     wanted_norm = normalize_for_search(title_name)
