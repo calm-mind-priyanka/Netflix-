@@ -3,6 +3,7 @@ const Player={
   variant:null, audio:null, audioTrack:null, subtitle:null, subtitleTrack:null, quality:null, source:null,
   season:null, episode:null, menuSection:null,
   tracks:{audio_tracks:[],subtitle_tracks:[]}, subtitleUrl:null, switchBusy:false,
+  selectedSettings:{},
 
   async open(titleId,label,variants,next,context={}){
     this.titleId=String(titleId);
@@ -17,6 +18,10 @@ const Player={
     this.allVariants=[...this.variants];
     this.current={label,next};
     this.variant=null; this.audio=null; this.audioTrack=null; this.subtitle=null; this.subtitleTrack=null; this.quality=null; this.source=null;
+    // Only settings explicitly chosen by the user are search constraints.
+    // The currently playing file supplies display values, but does not lock
+    // future searches to those values.
+    this.selectedSettings={};
     this.tracks={audio_tracks:[],subtitle_tracks:[]}; this.menuSection=null;
 
     const player=document.getElementById("player"), menu=document.getElementById("menu");
@@ -28,6 +33,10 @@ const Player={
     if(!first){this.showError("No playable file version is available.");return;}
     try{
       await this.select(first,0,false);
+      // The settings must start from the actual file that is playing.
+      // These values are then sent back to MongoDB with every later click,
+      // so choosing Tamil/720p/WEB-DL means "same title + those settings".
+      this.setVariantSettings(first);
       await this.loadTracks(first);
       this.render();
     }catch(e){this.showError(e.message||"Unable to start playback.");return}
@@ -54,6 +63,15 @@ const Player={
   },
   variantAudio(v){return Array.isArray(v?.audio_languages)?v.audio_languages.filter(Boolean):[]},
   variantSubs(v){return Array.isArray(v?.subtitle_languages)?v.subtitle_languages.filter(Boolean):[]},
+  setVariantSettings(v){
+    if(!v)return;
+    this.variant=v;
+    this.quality=v.quality&&String(v.quality).toLowerCase()!=="auto"?String(v.quality):null;
+    this.source=v.source&&String(v.source).toLowerCase()!=="unknown"?String(v.source):null;
+    this.audio=this.variantAudio(v)[0]||null;
+    if(v.season!=null)this.season=Number(v.season);
+    if(v.episode!=null)this.episode=Number(v.episode);
+  },
 
   // These are UI choices, not database results. The site does not query the
   // database to build these lists. A click on one of them triggers /api/resolve.
@@ -154,15 +172,20 @@ const Player={
   },
 
   async resolveExact(extra={}){
+    // Player Settings behaves like the main search engine: only values the
+    // user has explicitly chosen are sent as constraints. Current playback
+    // metadata is only a display/default value and is never used to silently
+    // lock the next search to that variant.
+    const selected=this.selectedSettings||{};
     const params=new URLSearchParams({
       title:this.titleName,
       type:this.titleType,
-      ...(this.season!=null?{season:String(this.season)}:{}),
-      ...(this.episode!=null?{episode:String(this.episode)}:{}),
-      ...(this.quality?{quality:String(this.quality)}:{}),
-      ...(this.source?{source:String(this.source)}:{}),
-      ...(this.audio?{audio:String(this.audio)}:{}),
-      ...(this.subtitle?{subtitle:String(this.subtitle)}:{}),
+      ...(selected.season!=null?{season:String(selected.season)}:{}),
+      ...(selected.episode!=null?{episode:String(selected.episode)}:{}),
+      ...(selected.quality?{quality:String(selected.quality)}:{}),
+      ...(selected.source?{source:String(selected.source)}:{}),
+      ...(selected.audio?{audio:String(selected.audio)}:{}),
+      ...(selected.subtitle?{subtitle:String(selected.subtitle)}:{}),
       ...Object.fromEntries(Object.entries(extra).filter(([,v])=>v!==null&&v!==undefined&&v!==""))
     });
     const data=await API.get("/api/resolve?"+params.toString());
@@ -175,7 +198,7 @@ const Player={
     const video=document.getElementById("video");
     const position=Number.isFinite(video.currentTime)?video.currentTime:0;
     const playing=!video.paused&&!video.ended;
-    const oldState={audio:this.audio,audioTrack:this.audioTrack,subtitleTrack:this.subtitleTrack,quality:this.quality,source:this.source,season:this.season,episode:this.episode,subtitle:this.subtitle,variant:this.variant};
+    const oldState={audio:this.audio,audioTrack:this.audioTrack,subtitleTrack:this.subtitleTrack,quality:this.quality,source:this.source,season:this.season,episode:this.episode,subtitle:this.subtitle,variant:this.variant,selectedSettings:{...this.selectedSettings}};
     this.switchBusy=true; this.menuSection=null;
     try{
       if(key==="audioTrack"){
@@ -187,16 +210,17 @@ const Player={
         if(embedded) await this.selectEmbeddedSubtitle(value);
         else { this.subtitle=value; await this.switchResolved(position,playing); }
       }else{
-        if(key==="audio")this.audio=String(value);
-        if(key==="quality")this.quality=String(value);
-        if(key==="source")this.source=String(value);
-        if(key==="season")this.season=Number(value);
-        if(key==="episode")this.episode=Number(value);
+        if(key==="audio"){this.audio=String(value);this.selectedSettings.audio=String(value);}
+        if(key==="quality"){this.quality=String(value);this.selectedSettings.quality=String(value);}
+        if(key==="source"){this.source=String(value);this.selectedSettings.source=String(value);}
+        if(key==="season"){this.season=Number(value);this.selectedSettings.season=Number(value);}
+        if(key==="episode"){this.episode=Number(value);this.selectedSettings.episode=Number(value);}
         await this.switchResolved(position,playing);
       }
       document.getElementById("menu").classList.add("hidden");
     }catch(e){
       Object.assign(this,oldState);
+      this.selectedSettings={...oldState.selectedSettings};
       this.showError(e.message||"Unable to switch this setting.");
       this.render();
     }finally{this.switchBusy=false}
@@ -206,9 +230,9 @@ const Player={
     const file=await this.resolveExact();
     // The resolver returns one real database file only after the click.
     // Keep it as the current playback target; do not build a variant catalog.
-    this.variant=file;
     this.variants=[file];
     await this.select(file,position,playing);
+    this.setVariantSettings(file);
     await this.loadTracks(file);
     this.render();
   },
@@ -313,6 +337,8 @@ const Player={
     let el=document.getElementById("playerError");
     if(!el){el=document.createElement("div");el.id="playerError";el.style.cssText="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:3;background:#111;padding:16px 20px;border:1px solid #333;border-radius:10px;max-width:min(90vw,520px);text-align:center;color:#fff";document.getElementById("player").appendChild(el)}
     el.textContent=message;
+    clearTimeout(this.errorTimer);
+    this.errorTimer=setTimeout(()=>el.remove(),4000);
   },
   clearError(){document.getElementById("playerError")?.remove()},
   close(){
