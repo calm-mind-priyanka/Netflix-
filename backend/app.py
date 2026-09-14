@@ -171,40 +171,11 @@ async def tmdb_meta(title, kind, year=None):
 
         results = data.get("results") or []
         wanted = normalize_for_search(title)
-
-        # Never attach an arbitrary first TMDB result to a title. A broad
-        # filename can return several similarly named titles, so prefer an
-        # exact normalized match, then a strong token/substring match with the
-        # requested year when available.
-        def candidate_name(candidate):
-            return normalize_for_search(candidate.get("title") or candidate.get("name"))
-
-        exact = [candidate for candidate in results if candidate_name(candidate) == wanted]
-        result = exact[0] if exact else None
-
-        if result is None and wanted:
-            scored = []
-            wanted_tokens = set(wanted.split())
-            for candidate in results:
-                name = candidate_name(candidate)
-                if not name:
-                    continue
-                candidate_tokens = set(name.split())
-                overlap = len(wanted_tokens & candidate_tokens) / max(1, len(wanted_tokens))
-                contains = wanted in name or name in wanted
-                date = candidate.get("first_air_date") or candidate.get("release_date") or ""
-                candidate_year = int(date[:4]) if date[:4].isdigit() else None
-                year_bonus = 0.25 if year and candidate_year == year else 0
-                score = (0.65 if contains else 0) + overlap * 0.5 + year_bonus
-                scored.append((score, candidate))
-            if scored:
-                scored.sort(key=lambda pair: pair[0], reverse=True)
-                best_score, best = scored[0]
-                # A weak match is worse than showing the real catalog poster
-                # or the neutral fallback.
-                if best_score >= 0.65:
-                    result = best
-
+        result = next(
+            (candidate for candidate in results
+             if normalize_for_search(candidate.get("title") or candidate.get("name")) == wanted),
+            results[0] if results else None,
+        )
         if not result:
             _tmdb_cache_put(key, {})
             return {}
@@ -235,13 +206,6 @@ async def enrich(title):
     return output
 
 
-async def enrich_many(items):
-    """Enrich a small visible set concurrently while TMDB requests stay bounded."""
-    if not items:
-        return []
-    return await asyncio.gather(*(enrich(item) for item in items))
-
-
 def _search_score(item, query_title):
     return search_title_score(item["title"], query_title)
 
@@ -250,9 +214,10 @@ async def home(request):
     # Only the records needed to populate the visible homepage are parsed.
     # TMDB is also limited to the number of unique cards the current UI can show.
     items = (await all_titles(limit=HOME_DOC_LIMIT))[:HOME_TITLE_LIMIT]
-    enriched_count = min(len(items), HOME_ENRICH_LIMIT)
-    enriched = await enrich_many(items[:enriched_count])
-    enriched.extend(items[enriched_count:])
+    enriched = []
+    for item in items[:HOME_ENRICH_LIMIT]:
+        enriched.append(await enrich(item))
+    enriched.extend(items[len(enriched):])
     return web.json_response({"ok": True, "items": enriched, "count": len(items)})
 
 
@@ -302,9 +267,12 @@ async def search(request):
         if parsed["episode"] is not None:
             copy["search_episode"] = parsed["episode"]
         selected.append(copy)
-    enriched_count = min(len(selected), SEARCH_ENRICH_LIMIT)
-    enriched = await enrich_many(selected[:enriched_count])
-    enriched.extend(selected[enriched_count:])
+    enriched = []
+    for index, item in enumerate(selected):
+        if index < SEARCH_ENRICH_LIMIT:
+            enriched.append(await enrich(item))
+        else:
+            enriched.append(item)
     return web.json_response({"ok": True, "items": enriched, "count": len(selected)})
 
 
@@ -350,6 +318,28 @@ async def stream(request):
     if streamer is None:
         raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
     return await streamer.stream(request, file_id)
+
+
+async def tracks(request):
+    file_id = request.match_info["file_id"]
+    token_value = request.query.get("token", "")
+    if not validate_stream_token(token_value, file_id):
+        raise web.HTTPForbidden(text="Invalid or expired stream token")
+    streamer = request.app.get("streamer")
+    if streamer is None:
+        raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
+    return web.json_response({"ok": True, **await streamer.probe_tracks(file_id)})
+
+
+async def subtitle(request):
+    file_id = request.match_info["file_id"]
+    token_value = request.query.get("token", "")
+    if not validate_stream_token(token_value, file_id):
+        raise web.HTTPForbidden(text="Invalid or expired stream token")
+    streamer = request.app.get("streamer")
+    if streamer is None:
+        raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
+    return await streamer.subtitle(request, file_id)
 
 
 async def stream_compatible(request):
@@ -435,8 +425,6 @@ def require_admin(request):
 
 async def admin_login(request):
     if request.method == "GET":
-        if is_admin(request):
-            raise web.HTTPFound("/admin/")
         return web.Response(text=ADMIN_HTML, content_type="text/html")
 
     data = await request.post()
@@ -628,6 +616,8 @@ def create_app():
     app.router.add_get("/api/title/{id}", title)
     app.router.add_get("/api/stream-token/{file_id}", token)
     app.router.add_get("/api/stream/{file_id}", stream)
+    app.router.add_get("/api/tracks/{file_id}", tracks)
+    app.router.add_get("/api/subtitle/{file_id}", subtitle)
     app.router.add_get("/api/stream-compatible/{file_id}", stream_compatible)
     app.router.add_get("/api/download/{file_id}", download)
 
@@ -645,8 +635,6 @@ def create_app():
     app.router.add_static("/", BASE / "frontend", show_index=False)
 
     async def admin_index(request):
-        if not is_admin(request):
-            raise web.HTTPFound("/admin")
         return web.FileResponse(BASE / "admin" / "index.html")
 
     app.router.add_get("/admin/", admin_index)
