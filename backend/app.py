@@ -61,8 +61,8 @@ TMDB_SESSION = None
 # entire bot collection in RAM on a small Koyeb instance.
 HOME_DOC_LIMIT = 300
 HOME_TITLE_LIMIT = 100
-HOME_ENRICH_LIMIT = 12
-SEARCH_ENRICH_LIMIT = 12
+HOME_ENRICH_LIMIT = 24
+SEARCH_ENRICH_LIMIT = 16
 TITLE_VARIANT_LIMIT = 500
 
 # Maintenance is deliberately kept in memory. The website must not create or
@@ -424,7 +424,7 @@ async def admin_login(request):
         "admin_session",
         make_admin_session(),
         httponly=True,
-        secure=request.secure,
+        secure=(request.secure or request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()=="https"),
         samesite="Lax",
         max_age=43200,
         path="/",
@@ -441,7 +441,9 @@ async def admin_logout(request):
 
 async def admin_status(request):
     require_admin(request)
-    items = await all_titles()
+    # Keep admin requests bounded on Koyeb Hobby. These are dashboard preview
+    # counts, not a reason to materialize the complete MongoDB catalog.
+    items = await all_titles(limit=HOME_DOC_LIMIT)
     return web.json_response(
         {
             "authenticated": True,
@@ -450,6 +452,7 @@ async def admin_status(request):
             "movies": sum(item["type"] == "movie" for item in items),
             "series": sum(item["type"] == "series" for item in items),
             "catalog_cache_age": None,
+            "counts_limited": True,
         }
     )
 
@@ -606,7 +609,12 @@ def create_app():
 
     app.router.add_get("/", frontend_index)
     app.router.add_static("/", BASE / "frontend", show_index=False)
-    app.router.add_static("/admin/", BASE / "admin", show_index=True)
+
+    async def admin_index(request):
+        return web.FileResponse(BASE / "admin" / "index.html")
+
+    app.router.add_get("/admin/", admin_index)
+    app.router.add_static("/admin/", BASE / "admin", show_index=False)
 
     app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)
