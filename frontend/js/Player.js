@@ -59,22 +59,34 @@ const Player={
     const section=(key,label,values,current)=>{
       if(!values.length)return "";
       const active=current||"Not selected";
-      return `<button class="settingRow" data-setting-section="${key}" aria-expanded="${this.menuSection===key}"><span><b>${label}</b><small>${playerEscape(active)}</small></span><span>›</span></button>
-      <div class="settingSubmenu ${this.menuSection===key?"":"hidden"}" data-setting-options="${key}">
-        ${values.map(value=>`<button class="settingOption ${value===current?"active":""}" data-player-${key}="${playerEscape(value)}"><span>${playerEscape(value)}</span>${value===current?"✓":""}</button>`).join("")}
-      </div>`;
+      return `<button class="settingRow" data-setting-section="${key}" aria-expanded="${this.menuSection===key}"><span><b>${label}</b><small>${playerEscape(active)}</small></span><span>›</span></button>`;
     };
 
-    document.getElementById("menu").innerHTML=`<div class="settingsHead"><h3>Settings</h3><button id="closeSettings" aria-label="Close settings">×</button></div>
-      ${section("language","Language",languages,this.lang)}
-      ${section("audio","Audio",audios,this.audio)}
-      ${section("quality","Quality",qualities,this.quality)}`;
+    const submenu=this.menuSection;
+    const submenuValues=submenu==="language"?languages:submenu==="audio"?audios:qualities;
+    const submenuLabel=submenu==="language"?"Language":submenu==="audio"?"Audio":"Quality";
+    const submenuCurrent=submenu==="language"?this.lang:submenu==="audio"?this.audio:this.quality;
+    const submenuHtml=submenu
+      ? `<div class="settingsSubHead"><button id="settingsBack" aria-label="Back to player settings">‹</button><strong>${submenuLabel}</strong></div>
+         <div class="settingSubmenu" data-setting-options="${submenu}">
+           ${submenuValues.map(value=>`<button class="settingOption ${value===submenuCurrent?"active":""}" data-player-${submenu}="${playerEscape(value)}"><span>${playerEscape(value)}</span>${value===submenuCurrent?"✓":""}</button>`).join("")}
+         </div>`
+      : `${section("quality","Quality",qualities,this.quality)}
+         ${section("language","Language",languages,this.lang)}
+         ${section("audio","Audio",audios,this.audio)}`;
+
+    document.getElementById("menu").innerHTML=`<div class="settingsHead"><h3>${submenu?playerEscape(submenuLabel):"Settings"}</h3><button id="closeSettings" aria-label="Close settings">×</button></div>
+      ${submenuHtml}`;
 
     document.querySelectorAll("[data-setting-section]").forEach(button=>{
       button.onclick=()=>{
-        this.menuSection=this.menuSection===button.dataset.settingSection?null:button.dataset.settingSection;
+        this.menuSection=button.dataset.settingSection;
         this.render();
       };
+    });
+    document.getElementById("settingsBack")?.addEventListener("click",()=>{
+      this.menuSection=null;
+      this.render();
     });
     document.getElementById("closeSettings")?.addEventListener("click",()=>{
       this.menuSection=null;
@@ -128,6 +140,15 @@ const Player={
     if(!variant?.file_id)throw new Error("This file has no valid media ID.");
     const video=document.getElementById("video");
     const position=Math.max(0,Number.isFinite(requestedPosition)?requestedPosition:(Number.isFinite(video.currentTime)?video.currentTime:0));
+    const previous={
+      variant:this.variant,
+      lang:this.lang,
+      quality:this.quality,
+      audio:this.audio,
+      source:video.currentSrc||video.src||"",
+      position:Number.isFinite(video.currentTime)?video.currentTime:0,
+      wasPlaying:!video.paused&&!video.ended
+    };
     const sameFile=this.variant?.file_id===variant.file_id && video.currentSrc;
     if(sameFile){
       if(position>0&&Math.abs(video.currentTime-position)>1)video.currentTime=position;
@@ -140,25 +161,43 @@ const Player={
     const endpoint=this.needsCompatibility(variant)?"/api/stream-compatible/":"/api/stream/";
     const source=endpoint+encodeURIComponent(variant.file_id)+"?token="+encodeURIComponent(data.token);
 
+    video.pause();
+    video.src=source;
+    video.load();
+
+    try{
+      await new Promise((resolve,reject)=>{
+        let settled=false;
+        const done=()=>{if(settled)return;settled=true;resolve()};
+        const fail=()=>{if(settled)return;settled=true;reject(new Error("Unable to load this media stream."))};
+        video.addEventListener("loadedmetadata",done,{once:true});
+        video.addEventListener("error",fail,{once:true});
+        setTimeout(()=>{if(!settled)done()},12000);
+      });
+    }catch(error){
+      // Do not leave a failed quality/language switch on a dead source.
+      this.variant=previous.variant;
+      this.lang=previous.lang;
+      this.quality=previous.quality;
+      this.audio=previous.audio;
+      if(previous.source){
+        video.src=previous.source;
+        video.load();
+        try{
+          if(previous.position>0)video.currentTime=previous.position;
+        }catch(_){}
+        if(previous.wasPlaying)video.play().catch(()=>{});
+      }
+      this.render();
+      throw error;
+    }
+
     this.variant=variant;
     const languages=Array.isArray(variant.languages)?variant.languages:[variant.language];
     this.lang=languages.find(Boolean)||null;
     this.quality=variant.quality||null;
     this.audio=(Array.isArray(variant.audio)?variant.audio:[]).find(value=>value!=="Unknown")||null;
     this.render();
-
-    video.pause();
-    video.src=source;
-    video.load();
-
-    await new Promise((resolve,reject)=>{
-      let settled=false;
-      const done=()=>{if(settled)return;settled=true;resolve()};
-      const fail=()=>{if(settled)return;settled=true;reject(new Error("Unable to load this media stream."))};
-      video.addEventListener("loadedmetadata",done,{once:true});
-      video.addEventListener("error",fail,{once:true});
-      setTimeout(()=>{if(!settled)done()},12000);
-    });
 
     if(position>0 && Number.isFinite(video.duration) && position<video.duration){
       try{video.currentTime=position}catch(_){ }
