@@ -116,6 +116,13 @@ def parse_doc(doc):
     ym = YEAR_RE.search(source)
     languages = _extract_languages(source)
     audio = _extract_audio(source)
+    # Filename/caption language tags are treated as spoken-audio languages by
+    # default. Subtitle languages are only inferred when the source explicitly
+    # marks them as subtitles (sub/subs/subbed/esub). Actual embedded tracks are
+    # discovered lazily by the streaming layer and can override this metadata.
+    subtitle_marked = bool(re.search(r"(?<!\w)(?:sub|subs|subbed|esub|subtitle|subtitles)(?!\w)", source, re.I))
+    audio_languages = list(languages) if not subtitle_marked else []
+    subtitle_languages = list(languages) if subtitle_marked else []
     language = " + ".join(languages) if languages else "Unknown"
 
     file_id = doc.get("_id")
@@ -135,8 +142,10 @@ def parse_doc(doc):
         "season": season,
         "episode": episode,
         "quality": qm.group(1).upper() if qm else "Auto",
-        "language": language,
-        "languages": languages or ["Unknown"],
+        "language": language,  # legacy field kept for old clients
+        "languages": languages or ["Unknown"],  # legacy field
+        "audio_languages": audio_languages,
+        "subtitle_languages": subtitle_languages,
         "audio": audio,
         "codec": _extract_codec(source),
         "year": int(ym.group(1)) if ym else None,
@@ -245,8 +254,14 @@ def extract_poster(caption):
     return match.group(0) if match else None
 
 
-def stable_id(title, kind):
-    return hashlib.sha256(f"{kind}:{normalize_for_search(title)}".encode("utf-8")).hexdigest()[:20]
+def stable_id(title, kind, year=None):
+    # Release year is part of the canonical identity. This prevents movies such as
+    # Venom (2018) and Venom: Let There Be Carnage (2021), or same-name releases,
+    # from being collapsed into one title when their parsed names overlap.
+    year_key = str(int(year)) if year else "unknown"
+    return hashlib.sha256(
+        f"{kind}:{normalize_for_search(title)}:{year_key}".encode("utf-8")
+    ).hexdigest()[:20]
 
 
 def quality_key(value):
@@ -263,7 +278,24 @@ class _CatalogBuilder:
         parsed = parse_doc(doc)
         if not parsed["file_id"]:
             return
-        title_id = stable_id(parsed["title"], parsed["type"])
+        # Prefer an exact title+year identity. A yearless file may join an existing
+        # title only when that normalized title has exactly one known release year;
+        # when multiple years exist, keeping the yearless item separate is safer than
+        # silently mixing different movies.
+        base = (parsed["type"], normalize_for_search(parsed["title"]))
+        if parsed["year"]:
+            title_id = stable_id(parsed["title"], parsed["type"], parsed["year"])
+        else:
+            candidates = [
+                tid for tid, item in self.titles.items()
+                if (item["type"], normalize_for_search(item["title"])) == base
+                and item.get("year")
+            ]
+            if len(candidates) == 1:
+                title_id = candidates[0]
+            else:
+                title_id = stable_id(parsed["title"], parsed["type"], None)
+
         if title_id not in self.titles:
             self.titles[title_id] = {
                 "id": title_id,
@@ -277,6 +309,8 @@ class _CatalogBuilder:
                 "rating": None,
                 "seasons": defaultdict(lambda: defaultdict(list)),
                 "variants": [],
+                "audio_languages": set(),
+                "subtitle_languages": set(),
                 "_order": len(self.order),
             }
             self.order.append(title_id)
@@ -289,11 +323,14 @@ class _CatalogBuilder:
         if not title["poster"] and parsed["poster"]:
             title["poster"] = parsed["poster"]
 
+        title["audio_languages"].update(parsed.get("audio_languages") or [])
+        title["subtitle_languages"].update(parsed.get("subtitle_languages") or [])
+
         variant = {
             key: parsed[key]
             for key in (
                 "file_id", "file_ref", "file_name", "file_size", "file_type", "mime_type",
-                "quality", "language", "languages", "audio", "codec", "caption", "season", "episode", "year",
+                "quality", "language", "languages", "audio_languages", "subtitle_languages", "audio", "codec", "caption", "season", "episode", "year",
             )
         }
 
@@ -307,6 +344,8 @@ class _CatalogBuilder:
         for title_id in self.order:
             title = self.titles[title_id]
             title["years"] = sorted(title["years"])
+            title["audio_languages"] = sorted(title["audio_languages"], key=str.casefold)
+            title["subtitle_languages"] = sorted(title["subtitle_languages"], key=str.casefold)
             title["seasons"] = [
                 {
                     "season": int(season),
