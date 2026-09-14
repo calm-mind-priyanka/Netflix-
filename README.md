@@ -79,3 +79,25 @@ If Telegram credentials are unavailable, the website can still start and serve t
 ## Important
 
 The original Auto Filter Bot ZIP is not part of this project and is not modified by the StreamBox build.
+
+
+## VLC-style web player upgrade
+
+The Online Stream layer remains Telegram-backed and browser-only. The browser never launches VLC.
+
+Implemented:
+- Exact real-file resolution for title, season, episode, quality, source, audio/language and subtitle-file metadata.
+- Independent Quality and Source metadata.
+- Right-side player settings for Audio/Language, Quality, Source, Season, Episode, embedded Audio Track and Subtitle Track.
+- Embedded audio/subtitle inspection through ffprobe, with browser-compatible FFmpeg conversion where needed.
+- Short-lived signed stream tokens and HTTP Range streaming remain in place.
+- Existing MongoDB records are read-only; no fake combinations are created.
+- TMDB poster/metadata enrichment is now bounded by the existing concurrency semaphore but covers all returned homepage/search cards instead of only the first few.
+- Admin maintenance responses use no-cache headers so a stale 503 page cannot be reused by the browser.
+- FFmpeg compatibility/transcode concurrency remains limited by `TRANSCODE_CONCURRENCY` (default 1), which is appropriate for small Koyeb instances.
+
+Browser limitation:
+- Desktop VLC's complete codec/container support cannot be reproduced by a browser.
+- Native browser playback is used where possible. MKV/HEVC or other incompatible media can use the server-side compatibility endpoint, which is CPU-heavy and intentionally serialized on the default configuration.
+- Embedded track switching through the compatibility endpoint is a new browser-compatible stream, not a claim of native MKV track switching in every browser.
+- Real live Koyeb/Telegram/TMDB tests require the production environment variables and actual media records; this ZIP has been syntax-checked and the resolver/parser/player logic has been tested offline against representative filenames.
