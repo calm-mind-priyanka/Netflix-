@@ -1,24 +1,50 @@
 const Player={
-  variants:[], current:null, titleId:null, variant:null,
-  audio:null, subtitle:null, quality:null, menuSection:null,
+  variants:[], allVariants:[], current:null, titleId:null, titleName:null, titleType:null,
+  variant:null, audio:null, audioTrack:null, subtitle:null, subtitleTrack:null, quality:null, source:null,
+  season:null, episode:null, menuSection:null,
   tracks:{audio_tracks:[],subtitle_tracks:[]}, subtitleUrl:null, switchBusy:false,
 
-  async open(titleId,label,variants,next){
-    this.titleId=String(titleId); this.variants=Array.isArray(variants)?variants.filter(v=>v?.file_id):[];
-    this.current={label,next}; this.variant=null; this.audio=null; this.subtitle=null; this.quality=null;
+  async open(titleId,label,variants,next,context={}){
+    this.titleId=String(titleId);
+    this.titleName=String(context.title||label||"").replace(/\s+•\s+S\d+\s+E\d+$/i,"").trim();
+    this.titleType=context.type||"movie";
+    this.season=context.season??null;
+    this.episode=context.episode??null;
+    this.variants=Array.isArray(variants)?variants.filter(v=>v?.file_id):[];
+    this.allVariants=[...this.variants];
+    if(this.titleType==="series"){
+      try{
+        const expanded=await API.get("/api/title/"+encodeURIComponent(this.titleId)+"?q="+encodeURIComponent(this.titleName));
+        this.allVariants=(expanded?.seasons||[]).flatMap(s=>(s.episodes||[]).flatMap(e=>e.variants||[])).filter(v=>v?.file_id);
+      }catch(_){}
+    }
+    this.current={label,next};
+    this.variant=null; this.audio=null; this.audioTrack=null; this.subtitle=null; this.subtitleTrack=null; this.quality=null; this.source=null;
     this.tracks={audio_tracks:[],subtitle_tracks:[]}; this.menuSection=null;
+
     const player=document.getElementById("player"), menu=document.getElementById("menu");
     player.classList.remove("hidden"); menu.classList.add("hidden");
     document.getElementById("nowPlaying").textContent=label||"Now Playing";
     this.render();
+
     const first=this.bestInitialVariant();
     if(!first){this.showError("No playable file version is available.");return;}
-    try{await this.select(first,0,false)}catch(e){this.showError(e.message||"Unable to start playback.");return}
-    await this.loadTracks(first);
-    this.render();
+    try{
+      await this.select(first,0,false);
+      await this.loadTracks(first);
+      this.render();
+    }catch(e){this.showError(e.message||"Unable to start playback.");return}
+
     const nextButton=document.getElementById("next");
-    if(next?.variants?.length){nextButton.classList.remove("hidden");nextButton.onclick=()=>this.open(titleId,`${next.title} • S${String(next.season).padStart(2,"0")} E${String(next.episode).padStart(2,"0")}`,next.variants,next.next||null)}
-    else nextButton.classList.add("hidden");
+    if(next?.variants?.length){
+      nextButton.classList.remove("hidden");
+      nextButton.onclick=()=>this.open(
+        titleId,
+        `${next.title} • S${String(next.season).padStart(2,"0")} E${String(next.episode).padStart(2,"0")}`,
+        next.variants,next.next||null,
+        {title:next.title,type:"series",season:next.season,episode:next.episode}
+      );
+    }else nextButton.classList.add("hidden");
   },
 
   bestInitialVariant(){
@@ -31,21 +57,63 @@ const Player={
   },
   variantAudio(v){return Array.isArray(v?.audio_languages)?v.audio_languages.filter(Boolean):[]},
   variantSubs(v){return Array.isArray(v?.subtitle_languages)?v.subtitle_languages.filter(Boolean):[]},
-
-  allAudioLanguages(){return [...new Set(this.variants.flatMap(v=>this.variantAudio(v)))].sort((a,b)=>a.localeCompare(b))},
-  allSubtitles(){return [...new Set(this.variants.flatMap(v=>this.variantSubs(v)))].sort((a,b)=>a.localeCompare(b))},
+  allAudioLanguages(){return [...new Set(this.variants.flatMap(v=>this.variantAudio(v)))].filter(x=>x&&x!=="Unknown").sort((a,b)=>a.localeCompare(b))},
+  allSubtitles(){return [...new Set(this.variants.flatMap(v=>this.variantSubs(v)))].filter(x=>x&&x!=="Unknown").sort((a,b)=>a.localeCompare(b))},
   allQualities(){return [...new Set(this.variants.map(v=>v.quality).filter(Boolean))].sort((a,b)=>(Number(String(a).match(/\d+/)?.[0]||9999)-Number(String(b).match(/\d+/)?.[0]||9999)))},
+  allSources(){return [...new Set(this.variants.map(v=>v.source).filter(x=>x&&x!=="Unknown"))].sort((a,b)=>a.localeCompare(b))},
+  allSeasons(){return [...new Set(this.allVariants.map(v=>v.season).filter(Number.isFinite))].sort((a,b)=>a-b)},
+  episodesForSeason(season){
+    return [...new Set(this.allVariants.filter(v=>v.season===season).map(v=>v.episode).filter(Number.isFinite))].sort((a,b)=>a-b);
+  },
 
   render(){
     const audio=[...new Set([...this.allAudioLanguages(),...(this.tracks.audio_tracks||[]).map(t=>t.language).filter(x=>x&&x!=="Unknown")])];
     const subs=[...new Set([...this.allSubtitles(),...(this.tracks.subtitle_tracks||[]).map(t=>t.language).filter(x=>x&&x!=="Unknown")])];
-    const qualities=this.allQualities();
-    const section=(key,label,values,current)=>!values.length?"":`<button class="settingRow" data-setting-section="${key}"><span><b>${label}</b><small>${playerEscape(current||"Not selected")}</small></span><span>›</span></button><div class="settingSubmenu ${this.menuSection===key?"":"hidden"}">${values.map(v=>`<button class="settingOption ${v===current?"active":""}" data-player-${key}="${playerEscape(v)}"><span>${playerEscape(v)}</span>${v===current?"✓":""}</button>`).join("")}</div>`;
-    document.getElementById("menu").innerHTML=`<div class="settingsHead"><h3>Settings</h3><button id="closeSettings" aria-label="Close settings">×</button></div>${section("quality","Quality",qualities,this.quality)}${section("audio","Audio",audio,this.audio)}${section("subtitle","Subtitles",subs,this.subtitle)}`;
-    document.querySelectorAll("[data-setting-section]").forEach(b=>b.onclick=()=>{this.menuSection=this.menuSection===b.dataset.settingSection?null:b.dataset.settingSection;this.render()});
-    document.getElementById("closeSettings")?.addEventListener("click",()=>{this.menuSection=null;document.getElementById("menu").classList.add("hidden")});
-    document.querySelectorAll("[data-player-quality]").forEach(b=>b.onclick=()=>this.choose("quality",b.dataset.playerQuality));
+    const embeddedAudio=(this.tracks.audio_tracks||[]).map(t=>t.language).filter(x=>x&&x!=="Unknown");
+    const embeddedSubs=(this.tracks.subtitle_tracks||[]).map(t=>t.language).filter(x=>x&&x!=="Unknown");
+    const qualities=this.allQualities(), sources=this.allSources(), seasons=this.allSeasons();
+    const section=(key,label,values,current,formatter=x=>x)=>!values.length?"":`<button class="settingRow" data-setting-section="${key}"><span><b>${label}</b><small>${playerEscape(current??"Not selected")}</small></span><span>›</span></button><div class="settingSubmenu ${this.menuSection===key?"":"hidden"}">${values.map(v=>`<button class="settingOption ${String(v)===String(current)?"active":""}" data-player-${key}="${playerEscape(v)}"><span>${playerEscape(formatter(v))}</span>${String(v)===String(current)?"✓":""}</button>`).join("")}</div>`;
+
+    let html=`<div class="settingsHead"><h3>Player settings</h3><button id="closeSettings" aria-label="Close settings">×</button></div>`;
+    html+=section("audio","Audio / Language",audio,this.audio);
+    html+=section("quality","Quality",qualities,this.quality);
+    html+=section("source","Source",sources,this.source);
+    if(this.titleType==="series") html+=section("season","Season",seasons,this.season,v=>`S${String(v).padStart(2,"0")}`);
+    if(this.titleType==="series" && this.season!=null) html+=section("episode","Episode",this.episodesForSeason(this.season),this.episode,v=>`E${String(v).padStart(2,"0")}`);
+    if(embeddedAudio.length) html+=section("audioTrack","Audio Track",embeddedAudio,this.audioTrack);
+    if(embeddedSubs.length) html+=section("subtitleTrack","Subtitle Track",embeddedSubs,this.subtitleTrack);
+    if(subs.length) html+=section("subtitle","Subtitle",subs,this.subtitle);
+    html+=`<button class="settingRow" id="speedSetting"><span><b>Playback speed</b><small id="speedValue">${playerEscape(document.getElementById("video").playbackRate||1)}×</small></span><span>›</span></button>`;
+    html+=`<button class="settingRow" id="pipSetting"><span><b>Picture-in-picture</b><small>Where supported by your browser</small></span><span>▣</span></button>`;
+
+    document.getElementById("menu").innerHTML=html;
+    document.querySelectorAll("[data-setting-section]").forEach(b=>b.onclick=()=>{
+      this.menuSection=this.menuSection===b.dataset.settingSection?null:b.dataset.settingSection; this.render();
+    });
+    document.getElementById("closeSettings")?.addEventListener("click",()=>{
+      this.menuSection=null; document.getElementById("menu").classList.add("hidden");
+    });
+    document.getElementById("speedSetting")?.addEventListener("click",()=>{
+      const video=document.getElementById("video");
+      const speeds=[0.5,0.75,1,1.25,1.5,1.75,2];
+      const i=Math.max(0,speeds.indexOf(video.playbackRate));
+      video.playbackRate=speeds[(i+1)%speeds.length];
+      this.render();
+    });
+    document.getElementById("pipSetting")?.addEventListener("click",async()=>{
+      try{
+        if(document.pictureInPictureElement) await document.exitPictureInPicture();
+        else if(document.pictureInPictureEnabled) await document.getElementById("video").requestPictureInPicture();
+        else this.showError("Picture-in-picture is not supported on this browser.");
+      }catch(_){this.showError("Picture-in-picture is not available here.")}
+    });
     document.querySelectorAll("[data-player-audio]").forEach(b=>b.onclick=()=>this.choose("audio",b.dataset.playerAudio));
+    document.querySelectorAll("[data-player-quality]").forEach(b=>b.onclick=()=>this.choose("quality",b.dataset.playerQuality));
+    document.querySelectorAll("[data-player-source]").forEach(b=>b.onclick=()=>this.choose("source",b.dataset.playerSource));
+    document.querySelectorAll("[data-player-season]").forEach(b=>b.onclick=()=>this.choose("season",Number(b.dataset.playerSeason)));
+    document.querySelectorAll("[data-player-episode]").forEach(b=>b.onclick=()=>this.choose("episode",Number(b.dataset.playerEpisode)));
+    document.querySelectorAll("[data-player-audioTrack]").forEach(b=>b.onclick=()=>this.choose("audioTrack",b.dataset.playerAudioTrack));
+    document.querySelectorAll("[data-player-subtitleTrack]").forEach(b=>b.onclick=()=>this.choose("subtitleTrack",b.dataset.playerSubtitleTrack));
     document.querySelectorAll("[data-player-subtitle]").forEach(b=>b.onclick=()=>this.choose("subtitle",b.dataset.playerSubtitle));
   },
 
@@ -55,21 +123,41 @@ const Player={
       if(!token?.token)return;
       const data=await API.get("/api/tracks/"+encodeURIComponent(variant.file_id)+"?token="+encodeURIComponent(token.token));
       if(data?.available)this.tracks=data;
-    }catch(_){/* filename metadata remains available */}
+    }catch(_){}
   },
 
   findVariantFor(key,value){
     const current=this.variant;
-    const candidates=this.variants.filter(v=>{
-      if(key==="quality")return v.quality===value;
-      if(key==="audio")return this.variantAudio(v).includes(value);
-      if(key==="subtitle")return this.variantSubs(v).includes(value);
+    const pool=(key==="season"||key==="episode")?this.allVariants:this.variants;
+    const candidates=pool.filter(v=>{
+      if(key==="quality")return String(v.quality)===String(value);
+      if(key==="source")return String(v.source)===String(value);
+      if(key==="audio" || key==="subtitle")return (key==="audio"?this.variantAudio(v):this.variantSubs(v)).includes(value);
+      if(key==="season")return v.season===Number(value);
+      if(key==="episode")return v.season===this.season && v.episode===Number(value);
       return false;
     });
     return candidates.sort((a,b)=>{
-      const sameA=(current&&a.file_id===current.file_id)?1:0, sameB=(current&&b.file_id===current.file_id)?1:0;
+      const sameA=current&&a.file_id===current.file_id?1:0, sameB=current&&b.file_id===current.file_id?1:0;
       return (sameB-sameA)||(this.rankVariant(b)-this.rankVariant(a));
     })[0]||null;
+  },
+
+  async resolveExact(extra={}){
+    const params=new URLSearchParams({
+      title:this.titleName,
+      type:this.titleType,
+      ...(this.season!=null?{season:String(this.season)}:{}),
+      ...(this.episode!=null?{episode:String(this.episode)}:{}),
+      ...(this.quality?{quality:String(this.quality)}:{}),
+      ...(this.source?{source:String(this.source)}:{}),
+      ...(this.audio?{audio:String(this.audio)}:{}),
+      ...(this.subtitle?{subtitle:String(this.subtitle)}:{}),
+      ...Object.fromEntries(Object.entries(extra).filter(([,v])=>v!==null&&v!==undefined&&v!==""))
+    });
+    const data=await API.get("/api/resolve?"+params.toString());
+    if(!data?.file?.file_id)throw new Error("The exact requested file is not available.");
+    return data.file;
   },
 
   async choose(key,value){
@@ -77,77 +165,86 @@ const Player={
     const video=document.getElementById("video");
     const position=Number.isFinite(video.currentTime)?video.currentTime:0;
     const playing=!video.paused&&!video.ended;
+    const oldState={audio:this.audio,audioTrack:this.audioTrack,subtitleTrack:this.subtitleTrack,quality:this.quality,source:this.source,season:this.season,episode:this.episode,subtitle:this.subtitle,variant:this.variant};
     this.switchBusy=true; this.menuSection=null;
     try{
-      if(key==="subtitle"){
-        await this.selectSubtitle(value,position);
-      }else if(key==="audio"){
-        await this.selectAudio(value,position,playing);
+      if(key==="season"){
+        this.season=Number(value); this.episode=null;
+        this.variants=this.allVariants.filter(v=>v.season===this.season);
+        if(!this.variants.length)throw new Error("That season is not available.");
+        this.render();
+        document.getElementById("menu").classList.remove("hidden");
+        return;
+      }else if(key==="audioTrack"){
+        await this.selectEmbeddedAudio(value,position,playing);
+      }else if(key==="subtitleTrack"){
+        await this.selectEmbeddedSubtitle(value);
+      }else if(key==="subtitle"){
+        const embedded=(this.tracks.subtitle_tracks||[]).find(t=>t.language===value);
+        if(embedded) await this.selectEmbeddedSubtitle(value);
+        else { this.subtitle=value; await this.switchResolved(position,playing); }
       }else{
-        const candidate=this.findVariantFor("quality",value);
-        if(!candidate)throw new Error("That quality is not available.");
-        await this.switchVariant(candidate,position,playing);
+        if(key==="audio")this.audio=String(value);
+        if(key==="quality")this.quality=String(value);
+        if(key==="source")this.source=String(value);
+        if(key==="season"){this.season=Number(value);this.episode=null}
+        if(key==="episode"){
+          this.episode=Number(value);
+          this.variants=this.allVariants.filter(v=>v.season===this.season&&v.episode===this.episode);
+          if(!this.variants.length)throw new Error("That episode is not available.");
+        }
+        await this.switchResolved(position,playing);
       }
       document.getElementById("menu").classList.add("hidden");
-    }catch(e){this.showError(e.message||"Unable to switch this setting.")}
-    finally{this.switchBusy=false}
+    }catch(e){
+      Object.assign(this,oldState);
+      this.showError(e.message||"Unable to switch this setting.");
+      this.render();
+    }finally{this.switchBusy=false}
   },
 
-  async selectAudio(value,position,playing){
-    // Prefer an embedded track in the current file: this is the closest browser
-    // equivalent to VLC's audio-track switch and avoids changing the movie file.
+  async switchResolved(position,playing){
+    const file=await this.resolveExact();
+    // Refresh the local variant list only with a real file returned by the resolver.
+    const existing=this.variants.find(v=>v.file_id===file.file_id);
+    if(existing)this.variant=existing;
+    else {this.variants=[...this.variants,file];this.allVariants=[...this.allVariants,file];this.variant=file}
+    await this.select(file,position,playing);
+    await this.loadTracks(file);
+    this.render();
+  },
+
+  async selectEmbeddedAudio(value,position,playing){
     const embedded=(this.tracks.audio_tracks||[]).find(t=>t.language===value);
-    if(embedded && this.variant){
-      await this.switchEmbeddedAudio(embedded.track,position,playing);
-      this.audio=value; this.render(); return;
-    }
-    const candidate=this.findVariantFor("audio",value);
-    if(!candidate)throw new Error("That audio language is not available.");
-    await this.switchVariant(candidate,position,playing);
+    if(!embedded||!this.variant)throw new Error("That audio track is not available in this file.");
+    await this.switchEmbeddedAudio(embedded.track,position,playing);
+    this.audioTrack=value; this.render();
   },
 
   async switchEmbeddedAudio(track,position,playing){
-    const v=this.variant;if(!v)throw new Error("No active media file.");
+    const v=this.variant;
     const data=await API.get("/api/stream-token/"+encodeURIComponent(v.file_id));
     if(!data?.token)throw new Error("Server did not return a stream token.");
     const source="/api/stream-compatible/"+encodeURIComponent(v.file_id)+"?token="+encodeURIComponent(data.token)+"&audio_track="+encodeURIComponent(track)+"&start="+encodeURIComponent(position.toFixed(3));
     await this.loadSource(source,0,playing,v,true);
   },
 
-  async selectSubtitle(value,position){
+  async selectEmbeddedSubtitle(value){
     const video=document.getElementById("video");
     this.removeSubtitleTrack();
     const embedded=(this.tracks.subtitle_tracks||[]).find(t=>t.language===value);
-    if(embedded && this.variant){
-      const data=await API.get("/api/stream-token/"+encodeURIComponent(this.variant.file_id));
-      if(!data?.token)throw new Error("Server did not return a stream token.");
-      const url="/api/subtitle/"+encodeURIComponent(this.variant.file_id)+"?token="+encodeURIComponent(data.token)+"&subtitle_track="+encodeURIComponent(embedded.track);
-      const response=await fetch(url); if(!response.ok)throw new Error("Unable to load this subtitle track.");
-      const blob=await response.blob(); this.subtitleUrl=URL.createObjectURL(blob);
-      const track=document.createElement("track"); track.kind="subtitles"; track.label=value; track.srclang=""; track.src=this.subtitleUrl; track.default=true; track.dataset.streamboxSubtitle="1";
-      video.appendChild(track); track.track.mode="showing"; this.subtitle=value; this.render(); return;
-    }
-    const candidate=this.findVariantFor("subtitle",value);
-    if(!candidate)throw new Error("That subtitle language is not available.");
-    const playing=!video.paused&&!video.ended;
-    await this.switchVariant(candidate,position,playing); this.subtitle=value;
-  },
-
-  removeSubtitleTrack(){
-    document.querySelectorAll('#video track[data-streambox-subtitle="1"]').forEach(t=>t.remove());
-    if(this.subtitleUrl){URL.revokeObjectURL(this.subtitleUrl);this.subtitleUrl=null}
-  },
-
-  needsCompatibility(v){
-    const name=String(v?.file_name||"").toLowerCase(), mime=String(v?.mime_type||"").toLowerCase(), codec=String(v?.codec||"").toLowerCase();
-    return !(/\.(mp4|m4v|webm)$/.test(name)||mime.includes("mp4")||mime.includes("webm"))||codec.includes("hevc")||codec.includes("h.265")||codec.includes("x265");
-  },
-
-  async switchVariant(v,position,playing){
-    const old={variant:this.variant,src:document.getElementById("video").currentSrc};
-    await this.select(v,position,playing);
-    await this.loadTracks(v); this.render();
-    return old;
+    if(!embedded||!this.variant)throw new Error("That subtitle track is not available in this file.");
+    const data=await API.get("/api/stream-token/"+encodeURIComponent(this.variant.file_id));
+    if(!data?.token)throw new Error("Server did not return a stream token.");
+    const url="/api/subtitle/"+encodeURIComponent(this.variant.file_id)+"?token="+encodeURIComponent(data.token)+"&subtitle_track="+encodeURIComponent(embedded.track);
+    const response=await fetch(url);
+    if(!response.ok)throw new Error("Unable to load this subtitle track.");
+    const blob=await response.blob();
+    this.subtitleUrl=URL.createObjectURL(blob);
+    const track=document.createElement("track");
+    track.kind="subtitles"; track.label=value; track.srclang=""; track.src=this.subtitleUrl;
+    track.default=true; track.dataset.streamboxSubtitle="1";
+    video.appendChild(track); track.track.mode="showing"; this.subtitleTrack=value; this.render();
   },
 
   async select(v,position=0,playing=false){
@@ -160,27 +257,37 @@ const Player={
     await this.loadSource(source,position,playing,v,compatible&&position>0);
   },
 
+  needsCompatibility(v){
+    const name=String(v?.file_name||"").toLowerCase(), mime=String(v?.mime_type||"").toLowerCase(), codec=String(v?.codec||"").toLowerCase();
+    return !(/\.(mp4|m4v|webm)$/.test(name)||mime.includes("mp4")||mime.includes("webm"))||codec.includes("hevc")||codec.includes("h.265")||codec.includes("x265");
+  },
+
   async loadSource(source,position,playing,v,absoluteStart){
     const video=document.getElementById("video");
     this.removeSubtitleTrack();
     video.pause(); video.removeAttribute("src"); video.load();
     const previous=this.variant;
-    this.variant=v; this.quality=v.quality||null;
-    this.audio=this.variantAudio(v)[0]||this.audio||null;
-    this.subtitle=this.variantSubs(v)[0]||null;
+    this.variant=v;
+    this.quality=v.quality||this.quality||null;
+    this.source=v.source||this.source||null;
+    if(!this.audio)this.audio=this.variantAudio(v)[0]||null;
     this.render(); video.src=source; video.load();
     try{
-      await new Promise((resolve,reject)=>{let done=false;const ok=()=>{if(!done){done=true;resolve()}};const fail=()=>{if(!done){done=true;reject(new Error("Unable to load this media stream."))}};video.addEventListener("loadedmetadata",ok,{once:true});video.addEventListener("error",fail,{once:true});setTimeout(ok,12000)});
-      if(!absoluteStart && position>0 && Number.isFinite(video.duration)){
+      await new Promise((resolve,reject)=>{
+        let done=false;
+        const ok=()=>{if(!done){done=true;resolve()}};
+        const fail=()=>{if(!done){done=true;reject(new Error("Unable to load this media stream."))}};
+        video.addEventListener("loadedmetadata",ok,{once:true});
+        video.addEventListener("error",fail,{once:true});
+        setTimeout(ok,12000);
+      });
+      if(!absoluteStart&&position>0&&Number.isFinite(video.duration)){
         const target=Math.min(position,Math.max(0,video.duration-0.25));
         if(target>0){try{video.currentTime=target}catch(_){} await this.restorePosition(target)}
       }
-      saveLocal(this.titleId,v.file_id,absoluteStart?position:(video.currentTime||position));
+      saveLocal(this.titleId,v.file_id,video.currentTime||position);
       this.clearError(); if(playing)await video.play().catch(()=>{});
-    }catch(e){
-      this.variant=previous;
-      throw e;
-    }
+    }catch(e){this.variant=previous;throw e}
   },
 
   async restorePosition(target){
@@ -192,10 +299,42 @@ const Player={
     }
   },
 
-  download(){if(!this.variant?.file_id){this.showError("No playable file is selected.");return}API.get("/api/stream-token/"+encodeURIComponent(this.variant.file_id)).then(d=>{if(!d.token)throw new Error("Server did not return a download token.");location.href="/api/download/"+encodeURIComponent(this.variant.file_id)+"?token="+encodeURIComponent(d.token)}).catch(e=>this.showError(e.message||"Unable to start download."))},
-  showError(message){let el=document.getElementById("playerError");if(!el){el=document.createElement("div");el.id="playerError";el.style.cssText="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:3;background:#111;padding:16px 20px;border:1px solid #333;border-radius:10px;max-width:min(90vw,520px);text-align:center;color:#fff";document.getElementById("player").appendChild(el)}el.textContent=message},
+  removeSubtitleTrack(){
+    document.querySelectorAll('#video track[data-streambox-subtitle="1"]').forEach(t=>t.remove());
+    if(this.subtitleUrl){URL.revokeObjectURL(this.subtitleUrl);this.subtitleUrl=null}
+  },
+  download(){
+    if(!this.variant?.file_id){this.showError("No playable file is selected.");return}
+    API.get("/api/stream-token/"+encodeURIComponent(this.variant.file_id)).then(d=>{
+      if(!d.token)throw new Error("Server did not return a download token.");
+      location.href="/api/download/"+encodeURIComponent(this.variant.file_id)+"?token="+encodeURIComponent(d.token);
+    }).catch(e=>this.showError(e.message||"Unable to start download."));
+  },
+  showError(message){
+    let el=document.getElementById("playerError");
+    if(!el){el=document.createElement("div");el.id="playerError";el.style.cssText="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:3;background:#111;padding:16px 20px;border:1px solid #333;border-radius:10px;max-width:min(90vw,520px);text-align:center;color:#fff";document.getElementById("player").appendChild(el)}
+    el.textContent=message;
+  },
   clearError(){document.getElementById("playerError")?.remove()},
-  close(){const video=document.getElementById("video");if(this.titleId)saveLocal(this.titleId,this.variant?.file_id,video.currentTime||0);this.removeSubtitleTrack();video.pause();video.removeAttribute("src");video.load();document.getElementById("player").classList.add("hidden");document.getElementById("menu").classList.add("hidden");this.clearError();this.menuSection=null}
+  close(){
+    const video=document.getElementById("video");
+    if(this.titleId)saveLocal(this.titleId,this.variant?.file_id,video.currentTime||0);
+    this.removeSubtitleTrack(); video.pause(); video.removeAttribute("src"); video.load();
+    document.getElementById("player").classList.add("hidden"); document.getElementById("menu").classList.add("hidden");
+    this.clearError(); this.menuSection=null;
+  }
 };
 function playerEscape(value){return String(value??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
 function saveLocal(id,file,position){if(!id)return;let data={};try{data=JSON.parse(localStorage.getItem("stream_progress")||"{}")||{}}catch(_){data={}}data[id]={file_id:file||null,position:Number(position)||0,updated:Date.now()};localStorage.setItem("stream_progress",JSON.stringify(data))}
+
+document.addEventListener("keydown",event=>{
+  const player=document.getElementById("player");
+  if(!player||player.classList.contains("hidden"))return;
+  const video=document.getElementById("video");
+  if(event.target?.matches?.("input,textarea,select"))return;
+  if(event.key===" "){event.preventDefault();video.paused?video.play().catch(()=>{}):video.pause();}
+  else if(event.key==="ArrowLeft"){event.preventDefault();video.currentTime=Math.max(0,(video.currentTime||0)-10);}
+  else if(event.key==="ArrowRight"){event.preventDefault();video.currentTime=Math.min(video.duration||Infinity,(video.currentTime||0)+10);}
+  else if(event.key==="m"){video.muted=!video.muted;}
+  else if(event.key==="f"){if(document.fullscreenElement)document.exitFullscreen?.();else document.getElementById("video").requestFullscreen?.();}
+});
