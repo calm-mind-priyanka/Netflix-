@@ -37,12 +37,14 @@ from .database import (
     find_media,
     iter_media,
     search_media,
+    search_media_by_title,
 )
 from .parser import (
     normalize,
     normalize_async,
     normalize_for_search,
     normalize_query,
+    parse_doc,
     search_title_score,
     stable_id,
 )
@@ -214,10 +216,11 @@ async def home(request):
     # Only the records needed to populate the visible homepage are parsed.
     # TMDB is also limited to the number of unique cards the current UI can show.
     items = (await all_titles(limit=HOME_DOC_LIMIT))[:HOME_TITLE_LIMIT]
-    enriched = []
-    for item in items[:HOME_ENRICH_LIMIT]:
-        enriched.append(await enrich(item))
-    enriched.extend(items[len(enriched):])
+    # Enrich every visible title, but cap concurrency so a small Koyeb instance
+    # never creates a burst of TMDB connections.
+    async def enrich_one(item):
+        return await enrich(item)
+    enriched = await asyncio.gather(*(enrich_one(item) for item in items))
     return web.json_response({"ok": True, "items": enriched, "count": len(items)})
 
 
@@ -267,12 +270,7 @@ async def search(request):
         if parsed["episode"] is not None:
             copy["search_episode"] = parsed["episode"]
         selected.append(copy)
-    enriched = []
-    for index, item in enumerate(selected):
-        if index < SEARCH_ENRICH_LIMIT:
-            enriched.append(await enrich(item))
-        else:
-            enriched.append(item)
+    enriched = await asyncio.gather(*(enrich(item) for item in selected))
     return web.json_response({"ok": True, "items": enriched, "count": len(selected)})
 
 
@@ -297,6 +295,62 @@ async def title(request):
             return web.json_response({"ok": True, **await enrich(target)})
 
     raise web.HTTPNotFound(text="Title not found")
+
+
+def _same_text(value, wanted):
+    return normalize_for_search(value) == normalize_for_search(wanted)
+
+
+async def resolve(request):
+    """Resolve the exact real Telegram file matching independent player settings."""
+    title_name = request.query.get("title", "").strip()
+    if not title_name:
+        raise web.HTTPBadRequest(text="A title is required")
+
+    wanted_type = request.query.get("type", "").strip().lower()
+    wanted_season = request.query.get("season")
+    wanted_episode = request.query.get("episode")
+    wanted_quality = request.query.get("quality", "").strip()
+    wanted_source = request.query.get("source", "").strip()
+    wanted_audio = request.query.get("audio", "").strip()
+    wanted_subtitle = request.query.get("subtitle", "").strip()
+
+    try:
+        season = int(wanted_season) if wanted_season not in (None, "") else None
+        episode = int(wanted_episode) if wanted_episode not in (None, "") else None
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="Invalid season or episode") from exc
+
+    docs = await search_media_by_title(title_name, limit=TITLE_VARIANT_LIMIT)
+    parsed = [parse_doc(doc) for doc in docs if doc.get("_id") is not None or doc.get("file_id")]
+    candidates = []
+    wanted_norm = normalize_for_search(title_name)
+
+    for item in parsed:
+        if wanted_type and item["type"] != wanted_type:
+            continue
+        if normalize_for_search(item["title"]) != wanted_norm:
+            continue
+        if season is not None and item.get("season") != season:
+            continue
+        if episode is not None and item.get("episode") != episode:
+            continue
+        if wanted_quality and wanted_quality.lower() != "auto" and str(item.get("quality", "")).casefold() != wanted_quality.casefold():
+            continue
+        if wanted_source and wanted_source.lower() != "unknown" and str(item.get("source", "")).casefold() != wanted_source.casefold():
+            continue
+        if wanted_audio and wanted_audio.casefold() not in {str(x).casefold() for x in (item.get("audio_languages") or [])}:
+            continue
+        if wanted_subtitle and wanted_subtitle.casefold() not in {str(x).casefold() for x in (item.get("subtitle_languages") or [])}:
+            continue
+        candidates.append(item)
+
+    if not candidates:
+        raise web.HTTPNotFound(text="The exact requested file is not available.")
+
+    # Deterministic choice only among exact matches; never downgrade a setting.
+    candidates.sort(key=lambda item: (-(int(str(item.get("quality") or "0").rstrip("p")) if str(item.get("quality") or "").rstrip("p").isdigit() else 0), str(item.get("file_name") or "").casefold()))
+    return web.json_response({"ok": True, "file": candidates[0]})
 
 
 async def token(request):
@@ -475,7 +529,8 @@ async def admin_status(request):
             "series": sum(item["type"] == "series" for item in items),
             "catalog_cache_age": None,
             "counts_limited": True,
-        }
+        },
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -489,7 +544,10 @@ async def admin_toggle_maintenance(request):
         raise web.HTTPBadRequest(text="Invalid JSON body") from exc
 
     MAINTENANCE = bool(data.get("maintenance"))
-    return web.json_response({"ok": True, "maintenance": MAINTENANCE})
+    return web.json_response(
+        {"ok": True, "maintenance": MAINTENANCE},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def admin_refresh(request):
@@ -546,6 +604,7 @@ async def maintenance_middleware(request, handler):
             text=MAINTENANCE_HTML,
             content_type="text/html",
             status=503,
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
         )
 
     return await handler(request)
@@ -614,6 +673,7 @@ def create_app():
     app.router.add_get("/api/home", home)
     app.router.add_get("/api/search", search)
     app.router.add_get("/api/title/{id}", title)
+    app.router.add_get("/api/resolve", resolve)
     app.router.add_get("/api/stream-token/{file_id}", token)
     app.router.add_get("/api/stream/{file_id}", stream)
     app.router.add_get("/api/tracks/{file_id}", tracks)
