@@ -224,29 +224,21 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
     if(title.type==="movie"){
       const variants=Array.isArray(title.variants)?title.variants:[];
       const qualities=[...new Set(variants.map(item=>item.quality).filter(Boolean))];
-      const languages=[...new Set(variants.flatMap(item=>Array.isArray(item.languages)?item.languages:[item.language]).filter(Boolean).filter(value=>value!=="Unknown"))];
-      const audios=[...new Set(variants.flatMap(item=>Array.isArray(item.audio)?item.audio:[]).filter(Boolean).filter(value=>value!=="Unknown"))];
+      const audios=[...new Set(variants.flatMap(item=>Array.isArray(item.audio_languages)?item.audio_languages:[]).filter(Boolean))];
+      const subtitles=[...new Set(variants.flatMap(item=>Array.isArray(item.subtitle_languages)?item.subtitle_languages:[]).filter(Boolean))];
 
       html+=`<section class="variantChoices">
         <h2>Quality</h2><div class="choiceRow">${qualities.map(value=>`<button data-movie-quality="${escapeHtml(value)}">${escapeHtml(value)}</button>`).join("")||'<small>Not specified</small>'}</div>
-        <h2>Language</h2><div class="choiceRow">${languages.map(value=>`<button data-movie-language="${escapeHtml(value)}">${escapeHtml(value)}</button>`).join("")||'<small>Not specified</small>'}</div>
-        <h2>Audio</h2><div class="choiceRow">${audios.map(value=>`<button data-movie-audio="${escapeHtml(value)}">${escapeHtml(value)}</button>`).join("")||'<small>Not specified</small>'}</div>
-        <div class="episode"><span>${variants.length} real version${variants.length===1?"":"s"} available</span><button class="primary" id="playMovie">▶ Play</button></div>
+        <h2>Audio</h2><div class="choiceRow">${audios.map(value=>`<button data-movie-audio="${escapeHtml(value)}">${escapeHtml(value)}</button>`).join("")||'<small>Track detected in player</small>'}</div>
+        <h2>Subtitles</h2><div class="choiceRow">${subtitles.map(value=>`<button data-movie-subtitle="${escapeHtml(value)}">${escapeHtml(value)}</button>`).join("")||'<small>Track detected in player</small>'}</div>
+        <div class="episode"><span>${variants.length} real file version${variants.length===1?"":"s"} combined</span><button class="primary" id="playMovie">▶ Play</button></div>
       </section>`;
 
       $("#detailBody").innerHTML=html;
 
-      const playVariant=(filterKey,value)=>{
-        const variant=variants.find(item=>{
-          if(filterKey==="quality")return item.quality===value;
-          if(filterKey==="language")return (Array.isArray(item.languages)?item.languages:[item.language]).includes(value);
-          return (Array.isArray(item.audio)?item.audio:[]).includes(value);
-        });
-        if(variant)Player.open(title.id,title.title,[variant],null);
-      };
-      $("#detailBody").querySelectorAll("[data-movie-quality]").forEach(button=>button.onclick=()=>playVariant("quality",button.dataset.movieQuality));
-      $("#detailBody").querySelectorAll("[data-movie-language]").forEach(button=>button.onclick=()=>playVariant("language",button.dataset.movieLanguage));
-      $("#detailBody").querySelectorAll("[data-movie-audio]").forEach(button=>button.onclick=()=>playVariant("audio",button.dataset.movieAudio));
+      $("#detailBody").querySelectorAll("[data-movie-quality]").forEach(button=>button.onclick=()=>Player.open(title.id,title.title,variants,null).then(()=>Player.choose("quality",button.dataset.movieQuality)));
+      $("#detailBody").querySelectorAll("[data-movie-audio]").forEach(button=>button.onclick=()=>Player.open(title.id,title.title,variants,null).then(()=>Player.choose("audio",button.dataset.movieAudio)));
+      $("#detailBody").querySelectorAll("[data-movie-subtitle]").forEach(button=>button.onclick=()=>Player.open(title.id,title.title,variants,null).then(()=>Player.choose("subtitle",button.dataset.movieSubtitle)));
       $("#playMovie").onclick=()=>Player.open(title.id,title.title,variants,null);
       return;
     }
