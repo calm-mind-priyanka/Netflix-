@@ -203,7 +203,11 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
 
     $("#details").classList.remove("hidden");
 
-    let html=`<div class="detail" ${poster(title)}>
+    const detailPoster=title.poster
+      ? `background-image:linear-gradient(0deg,rgba(8,8,8,.98),rgba(8,8,8,.22)),url("${escapeHtml(title.poster)}")`
+      : "";
+
+    let html=`<div class="detail" style="${detailPoster}">
       <div>
         <span class="eyebrow">${title.type==="series"?"SERIES":"MOVIE"}</span>
         <h1>${escapeHtml(title.title)}</h1>
@@ -436,6 +440,15 @@ async function doSearch(){
   }
 }
 
+function showHome(){
+  $("#search")?.classList.add("hidden");
+  $("#details")?.classList.add("hidden");
+  if(!$("#player")?.classList.contains("hidden")) Player.close();
+  window.scrollTo({top:0,behavior:"smooth"});
+}
+
+$("#bottomHome").onclick=showHome;
+
 $("#searchBtn").onclick=()=>{
   $("#search").classList.remove("hidden");
   $("#query").focus();
@@ -513,6 +526,11 @@ function showStage(id){
   });
 }
 
+async function waitForWindowLoad(){
+  if(document.readyState==="complete")return;
+  await new Promise(resolve=>window.addEventListener("load",resolve,{once:true}));
+}
+
 async function startExperience(){
   const startup=$("#startup");
   const appShell=$("#appShell");
@@ -523,16 +541,21 @@ async function startExperience(){
     return;
   }
 
-  // Catalog loading happens during the lightweight startup sequence so the
-  // introduction can reuse a few real catalog posters without another request.
+  // Start catalog work immediately, but keep the startup sequence independent
+  // from the catalog: a slow TMDB/database response must never freeze the logo.
   const catalogPromise=load();
-  const splashDelay=new Promise(resolve=>setTimeout(resolve,900));
-
-  await Promise.all([catalogPromise,splashDelay]);
+  const splashDelay=new Promise(resolve=>setTimeout(resolve,1200));
+  await Promise.all([splashDelay,waitForWindowLoad()]);
 
   showStage("loadingStage");
-  const minimumLoading=new Promise(resolve=>setTimeout(resolve,900));
-  await Promise.all([catalogPromise,minimumLoading]);
+  await new Promise(resolve=>setTimeout(resolve,700));
+
+  // Give the catalog request a bounded opportunity to finish. If it is still
+  // unavailable, the intro can still be shown and the Home retry state remains.
+  await Promise.race([
+    catalogPromise.catch(()=>false),
+    new Promise(resolve=>setTimeout(resolve,900))
+  ]);
 
   renderIntroSamples();
   showStage("introStage");
