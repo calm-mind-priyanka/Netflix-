@@ -181,6 +181,7 @@ async def search_media(query, limit=100):
     per_collection = max(1, int(limit))
     projection = {
         "_id": 1,
+        "file_id": 1,
         "file_name": 1,
         "file_size": 1,
         "file_type": 1,
@@ -226,3 +227,8 @@ async def search_media(query, limit=100):
         )
     return docs
 
+
+
+async def search_media_by_title(title, limit=500):
+    """Search real Auto Filter records for a title without changing MongoDB."""
+    return await search_media(str(title or "").strip(), limit=limit)
