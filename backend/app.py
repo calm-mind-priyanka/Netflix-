@@ -69,7 +69,7 @@ SEARCH_CACHE_TTL = 30
 SEARCH_CACHE_MAX = 256
 SEARCH_INFLIGHT = {}
 SEARCH_SEMAPHORE = asyncio.Semaphore(3)
-SEARCH_CANDIDATE_LIMIT = min(max(500, int(os.getenv("SEARCH_CANDIDATE_LIMIT", "1500"))), 1500)
+SEARCH_CANDIDATE_LIMIT = min(max(120, int(os.getenv("SEARCH_CANDIDATE_LIMIT", "300"))), 500)
 HOME_CACHE = None
 HOME_CACHE_TIME = 0.0
 
@@ -79,7 +79,7 @@ HOME_CACHE_TIME = 0.0
 HOME_DOC_LIMIT = 300
 HOME_TITLE_LIMIT = 100
 HOME_ENRICH_LIMIT = 8
-SEARCH_ENRICH_LIMIT = 6
+SEARCH_ENRICH_LIMIT = 4
 # Never let an environment value such as 10000 turn one HTTP request into a
 # huge in-memory MongoDB result set. The exact title can still have many real
 # variants; 300 is the default/safety ceiling for a single web request on Koyeb Free.
@@ -333,7 +333,7 @@ async def _search_uncached(query):
         # poster. Keep this bounded so Koyeb Free is not flooded with TMDB
         # requests. Cached TMDB entries are effectively free.
         if TMDB_API_KEY and selected:
-            enrich_limit = min(len(selected), 12)
+            enrich_limit = min(len(selected), SEARCH_ENRICH_LIMIT)
             values = await asyncio.gather(
                 *(enrich(selected[i]) for i in range(enrich_limit)),
                 return_exceptions=True,
