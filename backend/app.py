@@ -287,7 +287,17 @@ async def _search_uncached(query):
     parsed = normalize_query(query)
     search_title = parsed["title"] or query
     async with SEARCH_SEMAPHORE:
-        docs = await search_media(search_title, limit=SEARCH_CANDIDATE_LIMIT)
+        # First run the exact query against the raw Mongo records, just like
+        # Ultron Auto Filter.  This is important for queries such as
+        # "Reacher S05E07": the episode token is part of the searchable
+        # filename and must not be discarded before MongoDB gets a chance to
+        # match it.  We only fall back to the parsed title when the exact
+        # Auto Filter-style query returns nothing.
+        exact_query_docs = await search_media(query, limit=SEARCH_CANDIDATE_LIMIT)
+        docs = exact_query_docs
+        exact_query_matched = bool(exact_query_docs)
+        if not docs and search_title.casefold() != query.casefold():
+            docs = await search_media(search_title, limit=SEARCH_CANDIDATE_LIMIT)
         # An explicit year is part of the user's movie identity. Never replace
         # an exact-year search with a fuzzy title fallback, because that can
         # turn e.g. "Dhurandhar 2025" into a different Dhurandhar-like title.
@@ -306,14 +316,20 @@ async def _search_uncached(query):
         normalized_query_title = normalize_for_search(search_title)
         for item in items:
             normalized_item_title = normalize_for_search(item.get("title"))
-            # With an explicit year, title identity must also be exact after
-            # punctuation/spacing normalization. This prevents similar titles
-            # from leaking into a year-specific result.
-            if strict_identity:
-                if normalized_item_title != normalized_query_title:
+            # When the full user query itself matched MongoDB, trust that
+            # Auto Filter-style match. Do NOT apply the website's title scorer
+            # afterward, because that can discard a file that Ultron would
+            # return (for example: Reacher S05E07). The raw DB query is already
+            # the authoritative matching step.
+            #
+            # Only apply catalog-title identity checks when we had to fall back
+            # from the full query to the parsed title.
+            if not exact_query_matched:
+                if strict_identity:
+                    if normalized_item_title != normalized_query_title:
+                        continue
+                elif search_title_score(item["title"], search_title) < 0.68:
                     continue
-            elif search_title_score(item["title"], search_title) < 0.68:
-                continue
             if not _title_has_matching_variant(item, parsed):
                 continue
             candidates.append(item)
@@ -349,7 +365,7 @@ async def search(request):
     if not query:
         return web.json_response({"ok": True, "items": [], "count": 0})
 
-    key = normalize_for_search(query) or query.casefold()
+    key = re.sub(r"\s+", " ", query).strip().casefold()
     now = time.time()
     cached = SEARCH_CACHE.get(key)
     if cached and now - cached[0] < SEARCH_CACHE_TTL:
@@ -377,7 +393,7 @@ async def search(request):
 
 async def _cached_or_search_items(query):
     """Reuse a recent grouped search result for title/resolve requests."""
-    key = normalize_for_search(query) or str(query).casefold()
+    key = re.sub(r"\s+", " ", str(query)).strip().casefold()
     cached = SEARCH_CACHE.get(key)
     if cached and time.time() - cached[0] < SEARCH_CACHE_TTL:
         SEARCH_CACHE.move_to_end(key)
