@@ -58,3 +58,37 @@ main{padding-bottom:calc(78px + env(safe-area-inset-bottom))}
 @media(max-width:480px){.menu{right:8px;bottom:calc(70px + env(safe-area-inset-bottom));min-width:min(300px,calc(100vw - 16px));max-height:70vh;overflow:auto}.player video{height:calc(100% - 76px - env(safe-area-inset-bottom))}.now{padding-bottom:calc(12px + env(safe-area-inset-bottom))}}
 
 .fileCaption{position:absolute;left:12px;right:12px;bottom:64px;max-height:34vh;overflow:auto;padding:12px 14px;border:1px solid #292929;border-radius:10px;background:#0b0b0bf2;color:#cfcfcf;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.5;z-index:4;box-shadow:0 12px 30px #0009}.fileCaption:before{content:"FILE CAPTION";display:block;color:#e01436;font-weight:800;letter-spacing:.12em;font-size:10px;margin-bottom:7px}.now button{min-width:38px}
+
+/* Search = Netflix presentation + raw Auto Filter engine. */
+.searchShowcase{display:grid;grid-template-columns:minmax(120px,220px) 1fr;gap:24px;align-items:center;margin:4px 0 20px;padding:18px;border:1px solid rgba(255,255,255,.10);border-radius:18px;background:linear-gradient(135deg,rgba(255,255,255,.06),rgba(255,255,255,.02));overflow:hidden}
+.searchShowcase .poster{width:100%;max-width:220px;aspect-ratio:2/3;margin:auto}
+.searchShowcaseText h2{font-size:clamp(24px,4vw,38px);margin:7px 0}
+.searchShowcaseText p{color:#c7c7c7;line-height:1.55;margin:10px 0}
+.searchShowcaseText small{display:block;color:#aaa;line-height:1.45}
+.searchMeta{color:#bbb;font-size:13px}
+.autoFilterGlobal{margin-bottom:18px}
+.afHeader{display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap}
+.afHeader small{display:block;color:#999;margin-top:5px}
+.afHeader span{color:#aaa;font-size:12px}
+.afGroup{margin-top:16px}
+.afGroup>small{display:block;color:#999;margin-bottom:8px}
+.afChoices{display:flex;flex-wrap:wrap;gap:8px}
+.afChoice{border:1px solid #303030;border-radius:999px;background:#121212;color:#ddd;padding:9px 13px;cursor:pointer}
+.afChoice:hover,.afChoice:focus-visible{background:#242424;color:#fff;outline:none}
+.afResult{margin-top:16px}
+.afExact,.afMultiple{padding:14px;border:1px solid rgba(255,255,255,.10);border-radius:13px;background:rgba(0,0,0,.22)}
+.afExact{display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap}
+.afExact small,.afMultiple small{display:block;color:#999;margin-top:5px;line-height:1.4}
+.afMatchList{display:grid;gap:7px;margin-top:12px}
+.afMatch{padding:9px 10px;border-radius:9px;background:#111;border:1px solid #252525}
+.afMatch span{display:block;overflow-wrap:anywhere}
+.afMatch small{margin-top:3px}
+.afMuted{color:#777;font-size:13px}
+.searchRawGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:14px}
+@media(max-width:600px){
+  .searchShowcase{grid-template-columns:100px 1fr;gap:15px;padding:14px}
+  .searchShowcase .poster{max-width:100px}
+  .searchShowcaseText h2{font-size:22px}
+  .searchShowcaseText p{font-size:13px}
+  .searchRawGrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
