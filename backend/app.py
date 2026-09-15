@@ -104,6 +104,7 @@ async def all_titles(limit=None):
     projection = {
         "_id": 1, "file_id": 1, "file_ref": 1, "file_name": 1,
         "file_size": 1, "file_type": 1, "mime_type": 1, "caption": 1,
+        "tmdb_id": 1, "tmdbId": 1, "tmdb": 1,
     }
     result = await normalize_async(iter_media(projection=projection, limit=bounded))
     if bounded == HOME_DOC_LIMIT:
@@ -427,19 +428,23 @@ async def resolve(request):
     else:
         parsed = []
     candidates = []
-    for item in parsed:
-        if wanted_type and item["type"] != wanted_type:
-            continue
-        if search_title_score(item["title"], title_name) < 0.72:
-            continue
-        if not _variant_matches_request(item, wanted):
-            continue
-        subtitle = request.query.get("subtitle", "").strip()
-        if subtitle and subtitle.casefold() not in {str(x).casefold() for x in (item.get("subtitle_languages") or [])}:
-            continue
-        candidates.append(item)
+    subtitle = request.query.get("subtitle", "").strip()
+    target_type = str(grouped_target.get("type") or "").casefold() if grouped_target else ""
+    if wanted_type and target_type and target_type != wanted_type:
+        candidates = []
+    else:
+        for item in parsed:
+            # Variants are asset records and do not necessarily carry catalog-only
+            # fields such as type/title. Never index optional metadata directly.
+            if not item or not item.get("file_id"):
+                continue
+            if not _variant_matches_request(item, wanted):
+                continue
+            if subtitle and subtitle.casefold() not in {str(x).casefold() for x in (item.get("subtitle_languages") or [])}:
+                continue
+            candidates.append(item)
     if not candidates:
-        raise web.HTTPNotFound(text="The exact requested file is not available.")
+        return web.json_response({"ok": False, "error": "Requested variant is not available"}, status=404)
     def _quality_number(item):
         match = re.search(r"\d+", str(item.get("quality") or ""))
         return int(match.group(0)) if match else 0
