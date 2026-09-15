@@ -42,6 +42,14 @@ try:
 except ValueError:
     CATALOG_MAX_DOCS = 300
 
+# Search is intentionally separate from the small homepage catalog cap.
+# Auto Filter-style search must be able to collect all variants/episodes for a
+# matching title instead of stopping at the first 500 records.
+try:
+    SEARCH_MAX_DOCS = max(500, int(_env("SEARCH_MAX_DOCS", "10000")))
+except ValueError:
+    SEARCH_MAX_DOCS = 10000
+
 HOST = _env("HOST", "0.0.0.0")
 try:
     PORT = int(_env("PORT", "8080"))
