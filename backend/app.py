@@ -364,6 +364,58 @@ async def resolve(request):
     return web.json_response({"ok": True, "file": candidates[0]})
 
 
+async def token(request):
+    file_id = request.match_info["file_id"]
+    doc = await find_media(file_id, projection={"_id": 1})
+    if doc is None:
+        raise web.HTTPNotFound(text="Media not found in Auto Filter Bot database")
+    return web.json_response({"ok": True, "token": make_stream_token(file_id)})
+
+
+async def stream(request):
+    file_id = request.match_info["file_id"]
+    token_value = request.query.get("token", "")
+    if not validate_stream_token(token_value, file_id):
+        raise web.HTTPForbidden(text="Invalid or expired stream token")
+    streamer = request.app.get("streamer")
+    if streamer is None:
+        raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
+    return await streamer.stream(request, file_id)
+
+
+async def tracks(request):
+    file_id = request.match_info["file_id"]
+    token_value = request.query.get("token", "")
+    if not validate_stream_token(token_value, file_id):
+        raise web.HTTPForbidden(text="Invalid or expired stream token")
+    streamer = request.app.get("streamer")
+    if streamer is None:
+        raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
+    return web.json_response({"ok": True, **await streamer.probe_tracks(file_id)})
+
+
+async def subtitle(request):
+    file_id = request.match_info["file_id"]
+    token_value = request.query.get("token", "")
+    if not validate_stream_token(token_value, file_id):
+        raise web.HTTPForbidden(text="Invalid or expired stream token")
+    streamer = request.app.get("streamer")
+    if streamer is None:
+        raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
+    return await streamer.subtitle(request, file_id)
+
+
+async def stream_compatible(request):
+    file_id = request.match_info["file_id"]
+    token_value = request.query.get("token", "")
+    if not validate_stream_token(token_value, file_id):
+        raise web.HTTPForbidden(text="Invalid or expired stream token")
+    streamer = request.app.get("streamer")
+    if streamer is None:
+        raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
+    return await streamer.transcode(request, file_id)
+
+
 async def download(request):
     file_id = request.match_info["file_id"]
     token_value = request.query.get("token", "")
