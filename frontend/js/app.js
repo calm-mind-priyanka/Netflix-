@@ -134,6 +134,14 @@ async function load(){
 
 function bind(){
   document.querySelectorAll(".card").forEach(element=>{
+    // Raw Auto Filter search results are file records, not catalog/title IDs.
+    // They must never open the title-detail resolver because that resolver
+    // expects a grouped catalog ID and would show "file options unavailable".
+    if(element.dataset.rawFile === "1" || String(element.dataset.id||"").startsWith("file:")){
+      element.onclick=null;
+      element.style.cursor="default";
+      return;
+    }
     element.onclick=()=>showDetails(
       element.dataset.id,
       element.dataset.season?Number(element.dataset.season):null,
@@ -251,133 +259,58 @@ async function renderAutoFilter(title, mount, initialSeason=null, initialEpisode
 
 async function renderGlobalAutoFilter(query, items, mount){
   const state={season:null,episode:null,language:null,quality:null};
-  const first=items?.[0]||{};
+  const first=items?.[0];
   const isSeries=items?.some(x=>x.type==="series") || /(?:s\d{1,2}|season\s*\d+|e\d{1,3}|episode\s*\d+)/i.test(query);
   const parsedSeason=(query.match(/(?:s|season\s*)0*(\d{1,2})/i)||[])[1];
   const parsedEpisode=(query.match(/(?:e|episode\s*)0*(\d{1,3})/i)||[])[1];
   if(parsedSeason) state.season=Number(parsedSeason);
   if(parsedEpisode) state.episode=Number(parsedEpisode);
-
-  // Keep the original Netflix-style button treatment. These are the same
-  // categories exposed by the Auto Filter bot; the raw Mongo result set is
-  // always the source of truth.
   const languages=["Malayalam","Tamil","English","Hindi","Telugu","Kannada","Gujarati","Marathi","Punjabi"];
   const qualities=["360P","480P","720P","1080P","1440P","2160P"];
-  const seasons=Array.from({length:15},(_,i)=>i+1);
-  const episodes=Array.from({length:30},(_,i)=>i+1);
+  const seasons=Array.from({length:10},(_,i)=>i+1);
+  const episodes=Array.from({length:20},(_,i)=>i+1);
   const esc=escapeHtml;
-
-  const button=(kind,value,label=value,active=false)=>
-    `<button type="button" class="afChoice${active?" active":""}" data-af-kind="${esc(kind)}" data-af-value="${esc(value)}">${esc(label)}</button>`;
-
-  function detailMarkup(){
-    const posterStyle=first.poster
-      ? `background-image:linear-gradient(0deg,rgba(8,8,8,.98),rgba(8,8,8,.22)),url("${esc(first.poster)}")`
-      : "";
-    const typeLabel=isSeries?"SERIES":"MOVIE";
-    const description=first.description||first.caption||"Your matching files are ready. Use the filters below to choose the exact release.";
-    return `<div class="detail" style="${posterStyle}">
-      <div>
-        <span class="eyebrow">${typeLabel}</span>
-        <h1>${esc(first.title||query)}</h1>
-        <p>
-          ${esc(description)}
-          ${first.year?`<br>${esc(first.year)}`:""}
-          ${first.rating?`<br>★ ${Number(first.rating).toFixed(1)}`:""}
-        </p>
-        <small style="color:#aaa">${items.length} result${items.length===1?"":"s"} found</small>
+  const btn=(kind,value,label=value)=>`<button type="button" class="afChoice" data-kind="${esc(kind)}" data-value="${esc(value)}">${esc(label)}</button>`;
+  const draw=(status="")=>{
+    mount.innerHTML=`<section class="variantChoices" style="padding:18px;margin-bottom:18px;border:1px solid rgba(255,255,255,.12);border-radius:16px;background:rgba(255,255,255,.035)">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+        <div><b>Auto Filter</b><small style="display:block;opacity:.65;margin-top:4px">Filters apply to all matching files</small></div>
+        <span id="globalAfStatus" style="opacity:.7;font-size:.9rem">${esc(status||`${items.length} result${items.length===1?"":"s"}`)}</span>
       </div>
-    </div>`;
-  }
-
-  function draw(status=""){
-    const selected=(kind,value)=>state[kind]===value;
-    mount.innerHTML=`
-      ${detailMarkup()}
-      <section class="variantChoices" style="padding:18px 0 8px">
-        <div class="episode" style="border-top:1px solid #242424">
-          <span><strong>Results found</strong><small style="display:block;color:#888;margin-top:3px">Filters apply to the original matching files.</small></span>
-          <strong id="globalAfStatus" style="white-space:nowrap">${esc(status||`${items.length} result${items.length===1?"":"s"} found`)}</strong>
-        </div>
-
-        <div class="choiceRow">
-          <small>Language</small>
-          ${languages.map(v=>button("language",v,v,selected("language",v))).join("")}
-        </div>
-
-        <div class="choiceRow">
-          <small>Quality</small>
-          ${qualities.map(v=>button("quality",v,v,selected("quality",v))).join("")}
-        </div>
-
-        ${isSeries?`<div class="choiceRow">
-          <small>Season</small>
-          ${seasons.map(v=>button("season",String(v),`Season ${v}`,selected("season",v))).join("")}
-        </div>`:""}
-
-        ${isSeries?`<div class="choiceRow">
-          <small>Episode</small>
-          ${episodes.map(v=>button("episode",String(v),`Episode ${String(v).padStart(2,"0")}`,selected("episode",v))).join("")}
-        </div>`:""}
-
-        <div id="globalAfResult"></div>
-      </section>`;
-
-    mount.querySelectorAll(".afChoice").forEach(btn=>btn.onclick=async()=>{
-      const kind=btn.dataset.afKind;
-      const value=btn.dataset.afValue;
-      if(kind==="season") state.season=Number(value);
-      if(kind==="episode") state.episode=Number(value);
-      if(kind==="language") state.language=value;
-      if(kind==="quality") state.quality=value;
-      draw("Checking matching files…");
+      ${isSeries?`<div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Season</small><div style="display:flex;flex-wrap:wrap;gap:8px">${seasons.map(v=>btn("season",v,`Season ${v}`)).join("")}</div></div>`:""}
+      ${isSeries&&state.season!=null?`<div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Episode</small><div style="display:flex;flex-wrap:wrap;gap:8px">${episodes.map(v=>btn("episode",v,`Episode ${v}`)).join("")}</div></div>`:""}
+      <div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Language</small><div style="display:flex;flex-wrap:wrap;gap:8px">${languages.map(v=>btn("language",v)).join("")}</div></div>
+      <div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Quality</small><div style="display:flex;flex-wrap:wrap;gap:8px">${qualities.map(v=>btn("quality",v)).join("")}</div></div>
+      <div id="globalAfResult" style="margin-top:16px"></div>
+    </section>`;
+    mount.querySelectorAll(".afChoice").forEach(button=>button.onclick=async()=>{
+      const kind=button.dataset.kind,value=button.dataset.value;
+      if(kind==="season"){state.season=Number(value);state.episode=null;}
+      else if(kind==="episode") state.episode=Number(value);
+      else if(kind==="language") state.language=value;
+      else if(kind==="quality") state.quality=value;
       await check();
     });
-  }
-
+  };
   async function check(){
-    const status=mount.querySelector("#globalAfStatus");
-    const result=mount.querySelector("#globalAfResult");
+    const status=mount.querySelector("#globalAfStatus"),result=mount.querySelector("#globalAfResult");
+    if(status)status.textContent="Checking all matching files…";
     const params={q:query};
     if(state.season!=null)params.season=state.season;
     if(state.episode!=null)params.episode=state.episode;
     if(state.language)params.language=state.language;
     if(state.quality)params.quality=state.quality;
-
     try{
       const data=await API.get("/api/filter?"+new URLSearchParams(params));
-      if(status)status.textContent=`${data.count} result${data.count===1?"":"s"} found`;
-
-      if(!result)return;
-
-      if(data.count===1 && data.file?.file_id){
-        const file=data.file;
-        const label=esc(file.file_name||"Selected file");
-        result.innerHTML=`<div class="episode" style="margin-top:8px;gap:12px;flex-wrap:wrap">
-          <button type="button" class="episodePlay" id="globalAfFile" style="flex:1;min-width:220px;text-align:left">${label}</button>
-          <button type="button" class="primary" id="globalAfPlay">▶ Play</button>
-        </div>`;
-
-        const play=()=>Player.open(
-          file.file_id,
-          file.file_name,
-          [file],
-          null,
-          {title:file.title,type:file.type,year:file.year,season:file.season,episode:file.episode}
-        );
-        result.querySelector("#globalAfFile").onclick=play;
-        result.querySelector("#globalAfPlay").onclick=play;
-      }else if(data.count>1){
-        result.innerHTML=`<div class="state" style="padding:14px 2px">${data.count} files still match. Choose another language, quality, season or episode filter.</div>`;
-      }else{
-        result.innerHTML=`<div class="state empty" style="padding:14px 2px">NO FILES WERE FOUND</div>`;
-      }
+      if(status)status.textContent=`${data.count} matching file${data.count===1?"":"s"}`;
+      const file=data.file;
+      if(result)result.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 0"><span>${esc(file?.file_name||"Matching files found")}</span>${file?.file_id?`<button type="button" class="primary" id="globalAfPlay">▶ Play selected</button>`:""}</div>`;
+      result?.querySelector("#globalAfPlay")?.addEventListener("click",()=>Player.open(file.file_id,file.file_name,[file],null,{title:file.title,type:file.type,year:file.year,season:file.season,episode:file.episode}));
     }catch(e){
-      if(status)status.textContent="0 results found";
-      if(result)result.innerHTML=`<div class="state empty" style="padding:14px 2px">NO FILES WERE FOUND</div>`;
+      if(status)status.textContent="No matching files";
+      if(result)result.innerHTML=`<div class="state empty" style="padding:12px 0">NO FILES WERE FOUND</div>`;
     }
   }
-
   draw();
 }
 
@@ -604,7 +537,7 @@ async function doSearch(){
   state($("#results"),"Searching…");
 
   try{
-    if(searchRequestController)searchRequestController.abort();
+    if(searchRequestController) searchRequestController.abort();
     searchRequestController=new AbortController();
 
     const data=await API.get(
@@ -613,7 +546,7 @@ async function doSearch(){
     );
 
     if(sequence!==searchSequence)return;
-    if(!Array.isArray(data.items))throw new Error(data.error||"Invalid search response");
+    if(!Array.isArray(data.items)) throw new Error(data.error||"Invalid search response");
 
     searchTitles=data.items;
     if(!data.items.length){
@@ -621,14 +554,17 @@ async function doSearch(){
       return;
     }
 
-    // IMPORTANT: do not render every raw Mongo file as a card. The raw files
-    // remain the filter source, while the website keeps the original Netflix
-    // presentation: one representative poster/description + result count +
-    // cumulative Auto Filter buttons.
-    const panel=document.createElement("div");
-    await renderGlobalAutoFilter(query,data.items,panel);
-    $("#results").innerHTML="";
-    $("#results").appendChild(panel);
+    // Search now opens the ORIGINAL Netflix detail presentation directly.
+    // Season/episode in the query are passed as the preferred selection; the
+    // detail page still owns all Language/Quality/Season/Episode controls.
+    const first=data.items[0];
+    const seasonMatch=query.match(/(?:\bs|season\s*)0*(\d{1,2})\b/i);
+    const episodeMatch=query.match(/(?:\be|episode\s*)0*(\d{1,3})\b/i);
+    const season=seasonMatch?Number(seasonMatch[1]):null;
+    const episode=episodeMatch?Number(episodeMatch[1]):null;
+
+    $("#search").classList.add("hidden");
+    await showDetails(first.id,season,episode);
   }catch(error){
     if(error?.name==="AbortError" || sequence!==searchSequence)return;
     state($("#results"),`Search failed: ${error.message||"backend error"}`,"error");
