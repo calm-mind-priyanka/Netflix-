@@ -526,17 +526,20 @@ async function startExperience(){
     return;
   }
 
-  // Start catalog work immediately, but keep the startup sequence independent
-  // from the catalog: a slow TMDB/database response must never freeze the logo.
+  // The splash must be visible before any network/database work can hide it.
+  // Start the catalog in parallel, but never let a fast/slow API determine when
+  // the logo animation begins. This guarantees users see the intro from frame 1.
+  showStage("splashStage");
   const catalogPromise=load();
-  const splashDelay=new Promise(resolve=>setTimeout(resolve,1200));
-  await Promise.all([splashDelay,waitForWindowLoad()]);
+  await waitForWindowLoad();
+
+  // The logo animation itself is about 1.1s including the staggered letters.
+  // Keep the splash on screen long enough for the complete animation to be seen.
+  await new Promise(resolve=>setTimeout(resolve,2300));
 
   showStage("loadingStage");
-  await new Promise(resolve=>setTimeout(resolve,700));
+  await new Promise(resolve=>setTimeout(resolve,550));
 
-  // Give the catalog request a bounded opportunity to finish. If it is still
-  // unavailable, the intro can still be shown and the Home retry state remains.
   await Promise.race([
     catalogPromise.catch(()=>false),
     new Promise(resolve=>setTimeout(resolve,900))
