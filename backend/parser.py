@@ -12,6 +12,10 @@ SE_RE = re.compile(
     r"(?<!\w)s(?:eason)?\s*0*(\d{1,3})\s*[-_. ]?e(?:p(?:isode)?)?\s*0*(\d{1,4})(?!\w)",
     re.I,
 )
+ONE_X_ONE_RE = re.compile(
+    r"(?<!\w)(\d{1,3})\s*x\s*(\d{1,4})(?!\w)",
+    re.I,
+)
 SEASON_RE = re.compile(r"(?<!\w)(?:season|s)\s*0*(\d{1,3})(?!\w)", re.I)
 EP_RE = re.compile(r"(?<!\w)(?:episode|ep)\s*0*(\d{1,4})(?!\w)", re.I)
 YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
@@ -101,6 +105,29 @@ def _extract_codec(source):
     return "Unknown"
 
 
+def _extract_dynamic_range(source):
+    value = str(source or "")
+    if re.search(r"(?<!\w)dolby(?:\s+vision)?(?!\w)|(?<!\w)dv(?!\w)", value, re.I):
+        return "Dolby Vision"
+    if re.search(r"(?<!\w)hdr10(?:\+)?(?!\w)", value, re.I):
+        return "HDR10+" if re.search(r"hdr10\s*\+", value, re.I) else "HDR10"
+    if re.search(r"(?<!\w)hdr(?!\w)", value, re.I):
+        return "HDR"
+    if re.search(r"(?<!\w)sdr(?!\w)", value, re.I):
+        return "SDR"
+    return "Unknown"
+
+
+def _extract_audio_codec(audio_values):
+    for value in audio_values or []:
+        low = str(value).casefold()
+        if low.startswith("aac"):
+            return value
+        if low.startswith(("ac3", "eac3", "e-ac-3", "dd", "ddp", "dd+", "dts", "dts-hd", "atmos")):
+            return value
+    return "Unknown"
+
+
 def _is_generic_filename(name):
     value = re.sub(r"\s+", " ", str(name or "").strip().casefold())
     value = EXT_RE.sub("", value)
@@ -108,73 +135,141 @@ def _is_generic_filename(name):
         not value
         or bool(re.fullmatch(r"(?:file|video|movie|document|media)[ _.-]*\d*", value))
         or bool(re.fullmatch(r"(?:vid|file|document)[_-]?[a-z0-9]{4,}", value))
+        or bool(re.fullmatch(r"[a-f0-9]{8,}", value))
+        or bool(re.fullmatch(r"\d{5,}", value))
+        or len(value) <= 3
     )
 
 
+def _first_season_episode(source):
+    """Return the first real season/episode pair from release text."""
+    se = SE_RE.search(source or "")
+    if se:
+        return int(se.group(1)), int(se.group(2))
+    one_x_one = ONE_X_ONE_RE.search(source or "")
+    if one_x_one:
+        return int(one_x_one.group(1)), int(one_x_one.group(2))
+    return None, None
+
+
+def _canonical_audio_type(source):
+    value = str(source or "")
+    if re.search(r"(?<!\w)dual\s+audio(?!\w)", value, re.I):
+        return "Dual Audio"
+    if re.search(r"(?<!\w)multi\s+audio(?!\w)", value, re.I):
+        return "Multi Audio"
+    if re.search(r"(?<!\w)original\s+audio(?!\w)", value, re.I):
+        return "Original Audio"
+    return "Normal"
+
+
 def parse_doc(doc):
-    name = str(doc.get("file_name") or "").strip()
-    caption = str(doc.get("caption") or "")
-    source = _source_text(doc)
+    """Decode one real Auto Filter record without ever mutating it.
 
-    se = SE_RE.search(source)
-    season = int(se.group(1)) if se else None
-    episode = int(se.group(2)) if se else None
-    if season is None:
-        sm = SEASON_RE.search(source)
-        season = int(sm.group(1)) if sm else None
-    if episode is None:
-        em = EP_RE.search(source)
-        episode = int(em.group(1)) if em else None
+    Filename and caption are both metadata sources. A generic filename is
+    replaced by the caption for title decoding, while the combined text is
+    still used to find technical tags, languages, season/episode and poster.
+    A malformed document returns a safe, non-playable-free record or is later
+    skipped by the catalog builder; it must never crash a whole search.
+    """
+    try:
+        name = str(doc.get("file_name") or "").strip()
+        caption = html.unescape(str(doc.get("caption") or ""))
+        source = _source_text({"file_name": name, "caption": caption})
 
-    qm = QUALITY_RE.search(source)
-    ym = YEAR_RE.search(source)
-    languages = _extract_languages(source)
-    audio = _extract_audio(source)
-    source_match = SOURCE_RE.search(source)
-    source_name = re.sub(r"[-. ]+", "-", source_match.group(1).strip()).upper() if source_match else "Unknown"
-    source_name = {"WEB-DL": "WEB-DL", "WEBRIP": "WEBRip", "BLURAY": "BluRay", "BRRIP": "BRRip", "BDRIP": "BDRip", "HDRIP": "HDRip", "HDTV": "HDTV", "DVDRIP": "DVDRip", "HDTC": "HDTC", "HDTS": "HDTS", "WEB-CAM": "WEB-CAM", "CAMRIP": "CAMRip", "HDCAM": "HDCAM", "CAM": "CAM", "PREDB": "PreDB", "PRE-DVD": "Pre-DVD", "WEB": "WEB", "REMUX": "REMUX"}.get(source_name, source_name)
-    # Filename/caption language tags are treated as spoken-audio languages by
-    # default. Subtitle languages are only inferred when the source explicitly
-    # marks them as subtitles (sub/subs/subbed/esub). Actual embedded tracks are
-    # discovered lazily by the streaming layer and can override this metadata.
-    subtitle_marked = bool(re.search(r"(?<!\w)(?:sub|subs|subbed|esub|subtitle|subtitles)(?!\w)", source, re.I))
-    audio_languages = list(languages) if not subtitle_marked else []
-    subtitle_languages = list(languages) if subtitle_marked else []
-    language = " + ".join(languages) if languages else "Unknown"
+        season, episode = _first_season_episode(source)
+        if season is None:
+            sm = SEASON_RE.search(source)
+            season = int(sm.group(1)) if sm else None
+        if episode is None:
+            em = EP_RE.search(source)
+            episode = int(em.group(1)) if em else None
 
-    title_source = caption if _is_generic_filename(name) and caption.strip() else name or caption
+        qm = QUALITY_RE.search(source)
+        ym = YEAR_RE.search(source)
+        languages = _extract_languages(source)
+        audio = _extract_audio(source)
+        source_match = SOURCE_RE.search(source)
+        source_name = re.sub(r"[-. ]+", "-", source_match.group(1).strip()).upper() if source_match else "Unknown"
+        source_name = {
+            "WEB-DL": "WEB-DL", "WEBRIP": "WEBRip", "BLURAY": "BluRay",
+            "BRRIP": "BRRip", "BDRIP": "BDRip", "HDRIP": "HDRip",
+            "HDTV": "HDTV", "DVDRIP": "DVDRip", "HDTC": "HDTC",
+            "HDTS": "HDTS", "WEB-CAM": "WEB-CAM", "CAMRIP": "CAMRip",
+            "HDCAM": "HDCAM", "CAM": "CAM", "PREDB": "PreDB",
+            "PRE-DVD": "Pre-DVD", "WEB": "WEB", "REMUX": "REMUX",
+        }.get(source_name, source_name)
 
-    file_id = doc.get("_id")
-    if file_id is None:
-        file_id = doc.get("file_id", "")
+        subtitle_marked = bool(
+            re.search(r"(?<!\w)(?:sub|subs|subbed|esub|subtitle|subtitles)(?!\w)", source, re.I)
+        )
+        audio_languages = list(languages) if not subtitle_marked else []
+        subtitle_languages = list(languages) if subtitle_marked else []
+        language = " + ".join(languages) if languages else "Unknown"
 
-    return {
-        "file_id": str(file_id),
-        "file_ref": str(doc.get("file_ref") or ""),
-        "file_name": name,
-        "caption": caption,
-        "file_size": int(doc.get("file_size") or 0),
-        "file_type": doc.get("file_type"),
-        "mime_type": doc.get("mime_type"),
-        "title": clean_title(title_source),
-        "type": "series" if season is not None or episode is not None else "movie",
-        "season": season,
-        "episode": episode,
-        "quality": (
-            (lambda q: q if q.lower().endswith("p") or q.lower() in {"8k", "4k", "2k"} else q + "P")(qm.group(1).upper())
-            if qm else "Auto"
-        ),
-        "source": source_name,
-        "language": language,  # legacy field kept for old clients
-        "languages": languages or ["Unknown"],  # legacy field
-        "audio_languages": audio_languages,
-        "subtitle_languages": subtitle_languages,
-        "audio": audio,
-        "codec": _extract_codec(source),
-        "year": int(ym.group(1)) if ym else None,
-        "poster": extract_poster(caption),
-    }
+        title_source = caption if _is_generic_filename(name) and caption.strip() else name or caption
+        file_id = doc.get("_id")
+        if file_id is None:
+            file_id = doc.get("file_id", "")
 
+        quality = "Auto"
+        if qm:
+            q = qm.group(1).upper()
+            quality = q if q.endswith("P") or q.lower() in {"8k", "4k", "2k"} else q + "P"
+
+        return {
+            "file_id": str(file_id),
+            "file_ref": str(doc.get("file_ref") or ""),
+            "file_name": name,
+            "caption": caption,
+            "file_size": int(doc.get("file_size") or 0),
+            "file_type": doc.get("file_type"),
+            "mime_type": doc.get("mime_type"),
+            "title": clean_title(title_source),
+            "type": "series" if season is not None or episode is not None else "movie",
+            "season": season,
+            "episode": episode,
+            "quality": quality,
+            "source": source_name,
+            "language": language,
+            "languages": languages or ["Unknown"],
+            "audio_languages": audio_languages,
+            "subtitle_languages": subtitle_languages,
+            "audio": audio,
+            "audio_type": _canonical_audio_type(source),
+            "audio_codec": _extract_audio_codec(audio),
+            "codec": _extract_codec(source),
+            "dynamic_range": _extract_dynamic_range(source),
+            "year": int(ym.group(1)) if ym else None,
+            "poster": extract_poster(caption),
+        }
+    except Exception as exc:
+        # The catalog builder logs/skips this record. Never let one malformed
+        # Mongo document abort the complete search request.
+        return {
+            "file_id": "",
+            "file_ref": "",
+            "file_name": str(doc.get("file_name") or ""),
+            "caption": str(doc.get("caption") or ""),
+            "title": "Untitled",
+            "type": "movie",
+            "season": None,
+            "episode": None,
+            "quality": "Auto",
+            "source": "Unknown",
+            "language": "Unknown",
+            "languages": ["Unknown"],
+            "audio_languages": [],
+            "subtitle_languages": [],
+            "audio": ["Unknown"],
+            "audio_type": "Normal",
+            "audio_codec": "Unknown",
+            "codec": "Unknown",
+            "dynamic_range": "Unknown",
+            "year": None,
+            "poster": None,
+            "_parse_error": f"{type(exc).__name__}: {exc}",
+        }
 
 def _remove_release_brackets(text):
     def repl(match):
@@ -196,6 +291,7 @@ def clean_title(value):
     original = s
     s = _remove_release_brackets(s)
     s = SE_RE.sub(" ", s)
+    s = ONE_X_ONE_RE.sub(" ", s)
     s = SEASON_RE.sub(" ", s)
     s = EP_RE.sub(" ", s)
     s = QUALITY_RE.sub(" ", s)
@@ -223,49 +319,41 @@ def clean_title(value):
 
 
 def normalize_query(query):
-    """Split a human search into independent metadata constraints.
-
-    Search is intentionally decomposed before touching MongoDB: title, year,
-    season/episode, language, quality and source are matched independently
-    against parsed media records. The original filename/caption wording does
-    not need to equal the user's query.
-    """
+    """Parse search context without turning it into a new catalog identity."""
     value = str(query or "").strip()
     se = SE_RE.search(value)
     season = int(se.group(1)) if se else None
     episode = int(se.group(2)) if se else None
+    one_x_one = ONE_X_ONE_RE.search(value)
+    if se is None and one_x_one:
+        season = int(one_x_one.group(1))
+        episode = int(one_x_one.group(2))
     if season is None:
-        sm = re.search(r"(?<!\w)(?:season|s)\s*0*(\d{1,3})(?!\w)", value, re.I)
+        sm = SEASON_RE.search(value)
         if sm:
             season = int(sm.group(1))
     if episode is None:
-        em = re.search(r"(?<!\w)(?:episode|ep)\s*0*(\d{1,4})(?!\w)", value, re.I)
+        em = EP_RE.search(value)
         if em:
             episode = int(em.group(1))
 
     year_match = YEAR_RE.search(value)
     year = int(year_match.group(1)) if year_match else None
-
     quality_match = QUALITY_RE.search(value)
     quality = quality_match.group(1) if quality_match else None
-
-    source = None
     source_match = SOURCE_RE.search(value)
-    if source_match:
-        source = source_match.group(1)
+    source = source_match.group(1) if source_match else None
 
     languages = []
-    language = None
     low = value.casefold()
     for key, label in sorted(LANGUAGE_CODES.items(), key=lambda item: len(item[0]), reverse=True):
         if re.search(rf"(?<!\w){re.escape(key)}(?!\w)", low) and label not in languages:
             languages.append(label)
-    if languages:
-        language = languages[0]
 
     title_text = value
-    if se:
-        title_text = title_text.replace(se.group(0), " ")
+    for match in (se, one_x_one):
+        if match:
+            title_text = title_text.replace(match.group(0), " ")
     title_text = re.sub(r"(?<!\w)season\s*0*\d{1,3}(?!\w)", " ", title_text, flags=re.I)
     title_text = re.sub(r"(?<!\w)(?:episode|ep)\s*0*\d{1,4}(?!\w)", " ", title_text, flags=re.I)
     if year_match:
@@ -276,18 +364,22 @@ def normalize_query(query):
         title_text = title_text.replace(source_match.group(0), " ")
     for key in LANGUAGE_CODES:
         title_text = re.sub(rf"(?<!\w){re.escape(key)}(?!\w)", " ", title_text, flags=re.I)
+    title_text = re.sub(r"(?<!\w)(?:dual|multi)\s+audio(?!\w)", " ", title_text, flags=re.I)
     title_text = re.sub(r"\s+", " ", title_text).strip()
+    # A numeric four-digit title such as the movie "1917" is also matched by
+    # YEAR_RE. Keep it as the title when removing the year would empty the query.
+    if not title_text and year_match and value.strip() == year_match.group(0):
+        title_text = year_match.group(0)
     return {
         "title": clean_title(title_text),
         "season": season,
         "episode": episode,
         "year": year,
-        "language": language,
+        "language": languages[0] if languages else None,
         "languages": languages,
         "quality": quality,
         "source": source,
     }
-
 
 def search_title_score(title, query_title):
     a = normalize_for_search(title)
@@ -335,11 +427,19 @@ class _CatalogBuilder:
     def __init__(self):
         self.titles = {}
         self.order = []
+        self.seen_files = set()
 
     def add(self, doc):
         parsed = parse_doc(doc)
+        if parsed.get("_parse_error"):
+            # Keep the bad record from taking down the request, but loggable data
+            # is retained by the caller if desired. It has no playable file ID.
+            return
         if not parsed["file_id"]:
             return
+        if parsed["file_id"] in self.seen_files:
+            return
+        self.seen_files.add(parsed["file_id"])
         # Prefer an exact title+year identity. A yearless file may join an existing
         # title only when that normalized title has exactly one known release year;
         # when multiple years exist, keeping the yearless item separate is safer than
@@ -392,7 +492,7 @@ class _CatalogBuilder:
             key: parsed[key]
             for key in (
                 "file_id", "file_ref", "file_name", "file_size", "file_type", "mime_type",
-                "quality", "source", "language", "languages", "audio_languages", "subtitle_languages", "audio", "codec", "caption", "poster", "season", "episode", "year",
+                "quality", "source", "language", "languages", "audio_languages", "subtitle_languages", "audio", "audio_type", "audio_codec", "codec", "dynamic_range", "caption", "poster", "season", "episode", "year",
             )
         }
 
@@ -402,32 +502,76 @@ class _CatalogBuilder:
             title["variants"].append(variant)
 
     def finish(self):
+        # A yearless release can be safely attached to a same-title release only
+        # when exactly one known year exists. This removes order-dependent
+        # duplicates without risking a merge of genuinely different movies.
+        by_base = defaultdict(list)
+        for tid, item in self.titles.items():
+            by_base[(item["type"], normalize_for_search(item["title"]))].append(tid)
+        aliases = {}
+        for base, ids in by_base.items():
+            known = [tid for tid in ids if self.titles[tid].get("year")]
+            unknown = [tid for tid in ids if not self.titles[tid].get("year")]
+            if len(known) == 1 and unknown:
+                target = known[0]
+                for tid in unknown:
+                    aliases[tid] = target
+                    source = self.titles[tid]
+                    dest = self.titles[target]
+                    if not dest.get("poster") and source.get("poster"):
+                        dest["poster"] = source["poster"]
+                    dest["audio_languages"].update(source.get("audio_languages") or [])
+                    dest["subtitle_languages"].update(source.get("subtitle_languages") or [])
+                    dest["variants"].extend(source.get("variants") or [])
+                    for season, episodes in source.get("seasons", {}).items():
+                        for episode, variants in episodes.items():
+                            dest["seasons"][season][episode].extend(variants)
+        if aliases:
+            self.order = [tid for tid in self.order if tid not in aliases]
+            for tid in aliases:
+                self.titles.pop(tid, None)
+
         result = []
         for title_id in self.order:
             title = self.titles[title_id]
             title["years"] = sorted(title["years"])
             title["audio_languages"] = sorted(title["audio_languages"], key=str.casefold)
             title["subtitle_languages"] = sorted(title["subtitle_languages"], key=str.casefold)
-            title["seasons"] = [
-                {
-                    "season": int(season),
-                    "episodes": [
-                        {
-                            "episode": int(episode),
-                            "variants": sorted(
-                                variants,
-                                key=lambda item: (
-                                    quality_key(item["quality"]), item["language"].casefold(), item["file_name"].casefold()
-                                ),
-                            ),
-                        }
-                        for episode, variants in sorted(episodes.items())
-                    ],
-                }
-                for season, episodes in sorted(title["seasons"].items())
-            ]
+            seasons_out = []
+            for season, episodes in sorted(title["seasons"].items()):
+                episode_out = []
+                for episode, variants in sorted(episodes.items()):
+                    # Episode 0 represents a season-level asset with no episode
+                    # number. It is not fabricated into an episode in the UI.
+                    if int(episode) == 0:
+                        continue
+                    unique = {}
+                    for variant in variants:
+                        unique[variant["file_id"]] = variant
+                    episode_out.append({
+                        "episode": int(episode),
+                        "variants": sorted(
+                            unique.values(),
+                            key=lambda item: (quality_key(item["quality"]), item["language"].casefold(), item["file_name"].casefold()),
+                        ),
+                    })
+                if episode_out:
+                    season_poster = title.get("poster")
+                    if not season_poster:
+                        for episode_item in episode_out:
+                            season_poster = next((v.get("poster") for v in episode_item["variants"] if v.get("poster")), None)
+                            if season_poster:
+                                break
+                    seasons_out.append({
+                        "season": int(season),
+                        "poster": season_poster,
+                        "episodes": episode_out,
+                        "episode_numbers": [item["episode"] for item in episode_out],
+                    })
+            title["seasons"] = seasons_out
+            title["available_seasons"] = [item["season"] for item in seasons_out]
             title["variants"] = sorted(
-                title["variants"],
+                {v["file_id"]: v for v in title["variants"]}.values(),
                 key=lambda item: (quality_key(item["quality"]), item["language"].casefold(), item["file_name"].casefold()),
             )
             title.pop("_order", None)
