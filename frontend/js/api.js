@@ -1,6 +1,6 @@
 const API={
-  async get(url){
-    const response=await fetch(url,{credentials:"same-origin"});
+  async get(url,options={}){
+    const response=await fetch(url,{credentials:"same-origin",...options});
     let data=null;
     try{data=await response.json()}catch(_){}
     if(!response.ok){
