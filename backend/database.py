@@ -253,6 +253,7 @@ async def search_media(query, limit=None):
     projection = {
         "_id": 1, "file_id": 1, "file_name": 1, "file_size": 1,
         "file_type": 1, "mime_type": 1, "caption": 1, "file_ref": 1,
+        "tmdb_id": 1, "tmdbId": 1, "tmdb": 1,
     }
     configured = 0
     succeeded = 0
@@ -310,7 +311,8 @@ async def fuzzy_search_media(query, limit=80):
     pattern = re.compile("|".join(re.escape(x) for x in prefixes), re.I)
     mongo_filter = {"$or": [{"file_name": {"$regex": pattern}}, {"caption": {"$regex": pattern}}]}
     projection = {"_id": 1, "file_id": 1, "file_name": 1, "file_size": 1,
-                  "file_type": 1, "mime_type": 1, "caption": 1, "file_ref": 1}
+                  "file_type": 1, "mime_type": 1, "caption": 1, "file_ref": 1,
+                  "tmdb_id": 1, "tmdbId": 1, "tmdb": 1}
 
     candidates = []
     seen = set()
