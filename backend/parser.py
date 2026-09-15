@@ -2,6 +2,7 @@ import hashlib
 import html
 import re
 from collections import defaultdict
+from collections.abc import Mapping
 from difflib import SequenceMatcher
 
 QUALITY_RE = re.compile(
@@ -46,7 +47,7 @@ TECH_RE = re.compile(
     r"HEVC|AVC|x264|x265|H[ .-]?264|H[ .-]?265|10\s*bit|8\s*bit|"
     r"AAC(?:\s*[0-9]+(?:(?:\s*[.]\s*|\s+)[0-9]+)?)?|AC3|EAC3|DDP?(?:\s*[0-9]+(?:(?:\s*[.]\s*|\s+)[0-9]+)?)?|DD\+|DTS(?:[- .]?HD)?|"
     r"Atmos|ESubS?|NF|AMZN|DSNP|MAX|iTunes|PROPER|REPACK|UNCUT|REMUX|WEB|HQ|FHD|UHD|FULLHD|"
-    r"MKV|MP4|AVI|MOV|TS|10bit|HDR10(?:\+)?|DV|DOLBY(?:\s+VISION)?)(?!\w)",
+    r"AV1|DS4K|HDCMKV|SAONMKV|MKV|MP4|AVI|MOV|TS|10bit|HDR10(?:\+)?|DV|DOLBY(?:\s+VISION)?)(?!\w)",
     re.I,
 )
 SOURCE_RE = re.compile(
@@ -173,6 +174,8 @@ def parse_doc(doc):
     skipped by the catalog builder; it must never crash a whole search.
     """
     try:
+        if not isinstance(doc, Mapping):
+            return {"file_id": "", "_parse_error": "invalid document type"}
         name = str(doc.get("file_name") or "").strip()
         caption = html.unescape(str(doc.get("caption") or ""))
         source = _source_text({"file_name": name, "caption": caption})
@@ -186,7 +189,8 @@ def parse_doc(doc):
             episode = int(em.group(1)) if em else None
 
         qm = QUALITY_RE.search(source)
-        ym = YEAR_RE.search(source)
+        year_matches = list(YEAR_RE.finditer(source))
+        ym = year_matches[-1] if year_matches else None
         languages = _extract_languages(source)
         audio = _extract_audio(source)
         source_match = SOURCE_RE.search(source)
@@ -242,6 +246,7 @@ def parse_doc(doc):
             "dynamic_range": _extract_dynamic_range(source),
             "year": int(ym.group(1)) if ym else None,
             "poster": extract_poster(caption),
+            "tmdb_id": doc.get("tmdb_id") or doc.get("tmdbId") or doc.get("tmdb"),
         }
     except Exception as exc:
         # The catalog builder logs/skips this record. Never let one malformed
@@ -297,6 +302,12 @@ def clean_title(value):
     s = QUALITY_RE.sub(" ", s)
     s = TECH_RE.sub(" ", s)
     s = AUDIO_RE.sub(" ", s)
+    # Common packed/release labels seen in AutoFilter filenames. They are asset
+    # metadata, never part of the logical title. Keep this intentionally narrow
+    # so meaningful numeric movie titles are not damaged.
+    s = re.sub(r"(?<!\w)\d+(?:[.]\d+)?\s*(?:ch|channels?)(?!\w)", " ", s, flags=re.I)
+    s = re.sub(r"(?<!\w)(?:5[.]1|7[.]1)(?!\w)", " ", s, flags=re.I)
+    s = re.sub(r"(?<!\w)[a-z0-9]{2,16}(?:mkv)(?!\w)", " ", s, flags=re.I)
 
     # Year is release metadata when it is at the end or follows another title token.
     # Keep a numeric-only title such as "1917" intact.
@@ -444,24 +455,28 @@ class _CatalogBuilder:
         # title only when that normalized title has exactly one known release year;
         # when multiple years exist, keeping the yearless item separate is safer than
         # silently mixing different movies.
-        base = (parsed["type"], normalize_for_search(parsed["title"]))
-        if parsed["year"]:
-            title_id = stable_id(parsed["title"], parsed["type"], parsed["year"])
+        base = (parsed.get("type", "movie"), normalize_for_search(parsed.get("title")))
+        tmdb_id = str(parsed.get("tmdb_id") or "").strip()
+        if tmdb_id:
+            title_id = stable_id(f"tmdb:{tmdb_id}", parsed.get("type", "movie"), None)
+        elif parsed.get("year"):
+            title_id = stable_id(parsed.get("title"), parsed.get("type", "movie"), parsed.get("year"))
         else:
             candidates = [
                 tid for tid, item in self.titles.items()
-                if (item["type"], normalize_for_search(item["title"])) == base
+                if (item.get("type", "movie"), normalize_for_search(item.get("title"))) == base
                 and item.get("year")
             ]
             if len(candidates) == 1:
                 title_id = candidates[0]
             else:
-                title_id = stable_id(parsed["title"], parsed["type"], None)
+                title_id = stable_id(parsed.get("title"), parsed.get("type", "movie"), None)
 
         if title_id not in self.titles:
             self.titles[title_id] = {
                 "id": title_id,
                 "title": parsed["title"],
+                "tmdb_id": tmdb_id or None,
                 "type": parsed["type"],
                 "year": parsed["year"],
                 "years": set([parsed["year"]]) if parsed["year"] else set(),
@@ -478,7 +493,7 @@ class _CatalogBuilder:
             self.order.append(title_id)
 
         title = self.titles[title_id]
-        if parsed["year"]:
+        if parsed.get("year"):
             title["years"].add(parsed["year"])
             if not title["year"]:
                 title["year"] = parsed["year"]
@@ -491,7 +506,7 @@ class _CatalogBuilder:
         variant = {
             key: parsed[key]
             for key in (
-                "file_id", "file_ref", "file_name", "file_size", "file_type", "mime_type",
+                "file_id", "file_ref", "file_name", "file_size", "file_type", "mime_type", "tmdb_id",
                 "quality", "source", "language", "languages", "audio_languages", "subtitle_languages", "audio", "audio_type", "audio_codec", "codec", "dynamic_range", "caption", "poster", "season", "episode", "year",
             )
         }
