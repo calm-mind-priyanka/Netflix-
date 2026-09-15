@@ -32,7 +32,8 @@ function poster(title){
 function card(title){
   const season=title.search_season??"";
   const episode=title.search_episode??"";
-  return `<article class="card" data-id="${escapeHtml(title.id)}" data-season="${escapeHtml(season)}" data-episode="${escapeHtml(episode)}">
+  const rawFile=String(title.id||"").startsWith("file:");
+  return `<article class="card${rawFile?" searchFileCard":""}" data-id="${escapeHtml(title.id)}" data-raw-file="${rawFile?"1":"0"}" data-season="${escapeHtml(season)}" data-episode="${escapeHtml(episode)}">
     ${poster(title)}
     <strong>${escapeHtml(title.title)}</strong>
     <small>${title.type==="series"?"Series":"Movie"}${title.year?" • "+title.year:""}</small>
@@ -133,6 +134,14 @@ async function load(){
 
 function bind(){
   document.querySelectorAll(".card").forEach(element=>{
+    // Raw Auto Filter search results are file records, not catalog/title IDs.
+    // They must never open the title-detail resolver because that resolver
+    // expects a grouped catalog ID and would show "file options unavailable".
+    if(element.dataset.rawFile === "1" || String(element.dataset.id||"").startsWith("file:")){
+      element.onclick=null;
+      element.style.cursor="default";
+      return;
+    }
     element.onclick=()=>showDetails(
       element.dataset.id,
       element.dataset.season?Number(element.dataset.season):null,
@@ -245,6 +254,63 @@ async function renderAutoFilter(title, mount, initialSeason=null, initialEpisode
     }
   }
 
+  draw();
+}
+
+async function renderGlobalAutoFilter(query, items, mount){
+  const state={season:null,episode:null,language:null,quality:null};
+  const first=items?.[0];
+  const isSeries=items?.some(x=>x.type==="series") || /(?:s\d{1,2}|season\s*\d+|e\d{1,3}|episode\s*\d+)/i.test(query);
+  const parsedSeason=(query.match(/(?:s|season\s*)0*(\d{1,2})/i)||[])[1];
+  const parsedEpisode=(query.match(/(?:e|episode\s*)0*(\d{1,3})/i)||[])[1];
+  if(parsedSeason) state.season=Number(parsedSeason);
+  if(parsedEpisode) state.episode=Number(parsedEpisode);
+  const languages=["Malayalam","Tamil","English","Hindi","Telugu","Kannada","Gujarati","Marathi","Punjabi"];
+  const qualities=["360P","480P","720P","1080P","1440P","2160P"];
+  const seasons=Array.from({length:10},(_,i)=>i+1);
+  const episodes=Array.from({length:20},(_,i)=>i+1);
+  const esc=escapeHtml;
+  const btn=(kind,value,label=value)=>`<button type="button" class="afChoice" data-kind="${esc(kind)}" data-value="${esc(value)}">${esc(label)}</button>`;
+  const draw=(status="")=>{
+    mount.innerHTML=`<section class="variantChoices" style="padding:18px;margin-bottom:18px;border:1px solid rgba(255,255,255,.12);border-radius:16px;background:rgba(255,255,255,.035)">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+        <div><b>Auto Filter</b><small style="display:block;opacity:.65;margin-top:4px">Filters apply to all matching files</small></div>
+        <span id="globalAfStatus" style="opacity:.7;font-size:.9rem">${esc(status||`${items.length} result${items.length===1?"":"s"}`)}</span>
+      </div>
+      ${isSeries?`<div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Season</small><div style="display:flex;flex-wrap:wrap;gap:8px">${seasons.map(v=>btn("season",v,`Season ${v}`)).join("")}</div></div>`:""}
+      ${isSeries&&state.season!=null?`<div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Episode</small><div style="display:flex;flex-wrap:wrap;gap:8px">${episodes.map(v=>btn("episode",v,`Episode ${v}`)).join("")}</div></div>`:""}
+      <div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Language</small><div style="display:flex;flex-wrap:wrap;gap:8px">${languages.map(v=>btn("language",v)).join("")}</div></div>
+      <div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Quality</small><div style="display:flex;flex-wrap:wrap;gap:8px">${qualities.map(v=>btn("quality",v)).join("")}</div></div>
+      <div id="globalAfResult" style="margin-top:16px"></div>
+    </section>`;
+    mount.querySelectorAll(".afChoice").forEach(button=>button.onclick=async()=>{
+      const kind=button.dataset.kind,value=button.dataset.value;
+      if(kind==="season"){state.season=Number(value);state.episode=null;}
+      else if(kind==="episode") state.episode=Number(value);
+      else if(kind==="language") state.language=value;
+      else if(kind==="quality") state.quality=value;
+      await check();
+    });
+  };
+  async function check(){
+    const status=mount.querySelector("#globalAfStatus"),result=mount.querySelector("#globalAfResult");
+    if(status)status.textContent="Checking all matching files…";
+    const params={q:query};
+    if(state.season!=null)params.season=state.season;
+    if(state.episode!=null)params.episode=state.episode;
+    if(state.language)params.language=state.language;
+    if(state.quality)params.quality=state.quality;
+    try{
+      const data=await API.get("/api/filter?"+new URLSearchParams(params));
+      if(status)status.textContent=`${data.count} matching file${data.count===1?"":"s"}`;
+      const file=data.file;
+      if(result)result.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 0"><span>${esc(file?.file_name||"Matching files found")}</span>${file?.file_id?`<button type="button" class="primary" id="globalAfPlay">▶ Play selected</button>`:""}</div>`;
+      result?.querySelector("#globalAfPlay")?.addEventListener("click",()=>Player.open(file.file_id,file.file_name,[file],null,{title:file.title,type:file.type,year:file.year,season:file.season,episode:file.episode}));
+    }catch(e){
+      if(status)status.textContent="No matching files";
+      if(result)result.innerHTML=`<div class="state empty" style="padding:12px 0">NO FILES WERE FOUND</div>`;
+    }
+  }
   draw();
 }
 
@@ -503,20 +569,25 @@ async function doSearch(){
     searchTitles=data.items;
 
     if(!data.items.length){
-
-      state(
-        $("#results"),
-        `No results found for “${query}”.`,
-        "empty"
-      );
-
+      state($("#results"),`No results found for “${query}”.`,"empty");
       return;
     }
 
-    $("#results").innerHTML=
-      data.items.map(card).join("");
-
-    bind();
+    // Search results are now a global Auto Filter result set. No poster must
+    // be opened before selecting language/quality/season/episode.
+    const panel=document.createElement("div");
+    await renderGlobalAutoFilter(query,data.items,panel);
+    $("#results").innerHTML="";
+    $("#results").appendChild(panel);
+    const heading=document.createElement("div");
+    heading.innerHTML=`<div style="margin:8px 0 14px;opacity:.75"><b>${data.items.length}</b> matching file result${data.items.length===1?"":"s"} for “${escapeHtml(query)}”</div>`;
+    $("#results").appendChild(heading);
+    const grid=document.createElement("div");
+    grid.innerHTML=data.items.map(card).join("");
+    $("#results").appendChild(grid);
+    // Result cards are informational here; filters above apply to the entire
+    // result set, matching Ultron's bot flow.
+    grid.querySelectorAll(".card").forEach(el=>el.style.cursor="default");
 
   }catch(error){
 
