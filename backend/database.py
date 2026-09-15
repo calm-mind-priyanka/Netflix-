@@ -146,139 +146,96 @@ async def find_media(file_id, projection=None):
     return None
 
 
-def _search_term_pattern(term):
-    """Return a Mongo regex that mirrors Auto Filter style metadata matching.
+from functools import lru_cache
 
-    The bot accepts common human/release naming variations such as S05 vs
-    Season 5, E06 vs Episode 6, 1080 vs 1080p, and WEB-DL vs WEB DL/WEBDL.
-    Title words remain literal so unrelated titles are not pulled in.
+@lru_cache(maxsize=512)
+def _autofilter_regex(query):
+    """Build the same kind of Mongo regex used by Auto Filter.
+
+    Auto Filter does one bounded Mongo query using a release-name-aware regex,
+    rather than downloading a large candidate set and then searching it in
+    Python.  Keep this function intentionally small and deterministic.
     """
-    import re
-
-    value = str(term or "").strip()
-    low = value.casefold()
-    m = re.fullmatch(r"s(?:eason)?[-_. ]*0*(\d{1,3})[-_. ]*e(?:p(?:isode)?)?[-_. ]*0*(\d{1,4})", low)
-    if m:
-        season, episode = int(m.group(1)), int(m.group(2))
-        return (
-            rf"(?<!\w)(?:s0*{season}[-_. ]*e0*{episode}|"
-            rf"season\s*0*{season}\s*[-_. ]*episode\s*0*{episode})(?!\w)"
-        )
-    m = re.fullmatch(r"s(?:eason)?[-_. ]*0*(\d{1,3})", low)
-    if m:
-        n = int(m.group(1))
-        return rf"(?<!\w)(?:s0*{n}|season\s*0*{n})(?!\w)"
-    m = re.fullmatch(r"e(?:p(?:isode)?)?[-_. ]*0*(\d{1,4})", low)
-    if m:
-        n = int(m.group(1))
-        return rf"(?<!\w)(?:e0*{n}|ep\s*0*{n}|episode\s*0*{n})(?!\w)"
-    m = re.fullmatch(r"(\d{3,4})p?", low)
-    if m:
-        n = m.group(1)
-        return rf"(?<!\w){re.escape(n)}p?(?!\w)"
-    source_aliases = {
-        "web-dl": r"WEB[- .]?DL", "webdl": r"WEB[- .]?DL", "web dl": r"WEB[- .]?DL",
-        "webrip": r"WEB[- .]?Rip", "bluray": r"Blu[- .]?Ray", "brrip": r"BR[- .]?Rip",
-        "bdrip": r"BD[- .]?Rip", "hdrip": r"HD[- .]?Rip", "web-cam": r"WEB[- .]?CAM",
-        "predvd": r"Pre[- .]?DVD", "pre-dvd": r"Pre[- .]?DVD",
-    }
-    if low in source_aliases:
-        return rf"(?<!\w)(?:{source_aliases[low]})(?!\w)"
-    lang_aliases = {
-        "hindi": "(?:hindi|hin)", "english": "(?:english|eng)", "tamil": "(?:tamil|tam)",
-        "telugu": "(?:telugu|tel)", "malayalam": "(?:malayalam|mal)", "kannada": "(?:kannada|kan)",
-        "bengali": "(?:bengali|ben)", "bangla": "(?:bangla|ben)", "marathi": "(?:marathi|mar)",
-        "punjabi": "(?:punjabi|pun)", "gujarati": "(?:gujarati|guj)", "bhojpuri": "(?:bhojpuri|bho)",
-        "korean": "(?:korean|kor)", "spanish": "(?:spanish|spa)", "french": "(?:french|fra)",
-        "german": "(?:german|ger)", "chinese": "(?:chinese|chi)", "japanese": "(?:japanese|jpn)",
-        "urdu": "(?:urdu|urd)",
-    }
-    if low in lang_aliases:
-        return rf"(?<!\w){lang_aliases[low]}(?!\w)"
-    return re.escape(value)
+    value = re.sub(r"\s+", " ", str(query or "").strip())
+    if not value:
+        return None
+    parts = value.split(" ")
+    escaped = [r"(\b|[\.\+\-_])" + re.escape(part) + r"(\b|[\.\+\-_])" for part in parts]
+    return r".*[\s\.\+\-_()\[\]]".join(escaped) if len(escaped) > 1 else escaped[0]
 
 
 def build_search_filter(query):
-    """Build an Auto Filter-style case-insensitive token search over filename/caption."""
-    import re
-
-    terms = [t for t in re.split(r"\s+", str(query or "").strip()) if t]
-    if not terms:
+    """Build an Auto Filter-compatible filename/caption regex filter."""
+    pattern = _autofilter_regex(query)
+    if not pattern:
         return None
+    return {
+        "$or": [
+            {"file_name": {"$regex": pattern, "$options": "i"}},
+            {"caption": {"$regex": pattern, "$options": "i"}},
+        ]
+    }
 
-    clauses = []
-    for term in terms:
-        pattern = _search_term_pattern(term)
-        clauses.append(
-            {
-                "$or": [
-                    {"file_name": {"$regex": pattern, "$options": "i"}},
-                    {"caption": {"$regex": pattern, "$options": "i"}},
-                ]
-            }
-        )
-    return {"$and": clauses}
+
+_SEARCH_PROJECTION = {
+    "_id": 1,
+    "file_id": 1,
+    "file_name": 1,
+    "file_size": 1,
+    "file_type": 1,
+    "mime_type": 1,
+    "caption": 1,
+    "file_ref": 1,
+    "tmdb_id": 1,
+    "tmdbId": 1,
+    "tmdb": 1,
+}
+
 
 async def search_media(query, limit=None):
-    """Search Auto Filter records across filename *and caption*.
+    """Fast, read-only Auto Filter style search.
 
-    Unlike the old website implementation, this does not silently stop after
-    500 records.  A bounded safety limit can still be supplied by the caller,
-    while the default collects the complete Mongo result set needed to build a
-    title's seasons/episodes/variants.
+    The hot path is deliberately: regex -> Mongo -> small projection ->
+    bounded result list.  No count_documents(), no full collection scan in
+    Python, and no Telegram/TMDB calls happen here.
     """
     search_filter = build_search_filter(query)
     if not search_filter:
         return []
 
-    # For web search, Mongo is only the candidate source; exact title/year/
-    # season/quality/language matching is performed by the catalog parser.
-    # When a title contains several words, an $and of regex clauses can force
-    # Mongo to repeatedly scan large unindexed collections. Use the first
-    # meaningful title token as the bounded candidate key instead. This keeps
-    # SEARCH_MAX_DOCS=1500 while avoiding a multiplicative regex workload.
-    raw_terms = [t for t in re.split(r"[^a-zA-Z0-9]+", str(query or "")) if len(t) >= 2]
-    if len(raw_terms) > 1:
-        token = raw_terms[0]
-        escaped = re.escape(token)
-        search_filter = {
-            "$or": [
-                {"file_name": {"$regex": escaped, "$options": "i"}},
-                {"caption": {"$regex": escaped, "$options": "i"}},
-            ]
-        }
-
+    bounded = 120 if limit is None else max(1, min(int(limit), 1500))
     docs = []
     seen = set()
-    projection = {
-        "_id": 1, "file_id": 1, "file_name": 1, "file_size": 1,
-        "file_type": 1, "mime_type": 1, "caption": 1, "file_ref": 1,
-        "tmdb_id": 1, "tmdbId": 1, "tmdb": 1,
-    }
     configured = 0
     succeeded = 0
     errors = []
-    remaining = None if limit is None else max(1, int(limit))
 
+    # Match Auto Filter's newest-first behavior.  We intentionally fetch a
+    # small primary window first and only touch the secondary DB when the
+    # primary cannot fill that window.
     for name, collection in (("primary", media), ("secondary", media2)):
-        if collection is None:
+        if collection is None or len(docs) >= bounded:
             continue
         configured += 1
+        remaining = bounded - len(docs)
         try:
-            cursor = collection.find(search_filter, projection).sort("$natural", -1)
-            async for doc in cursor:
+            rows = await (
+                collection.find(search_filter, _SEARCH_PROJECTION)
+                .sort("$natural", -1)
+                .limit(remaining)
+                .to_list(length=remaining)
+            )
+            succeeded += 1
+            for doc in rows:
                 key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
                 if key and key in seen:
                     continue
                 if key:
                     seen.add(key)
                 docs.append(doc)
-                if remaining is not None and len(docs) >= remaining:
-                    return docs
-            succeeded += 1
         except Exception as exc:
             errors.append(f"{name}: {type(exc).__name__}")
-            LOGGER.exception("%s MongoDB search failed", name)
+            LOGGER.warning("%s MongoDB search failed: %s", name, type(exc).__name__)
 
     if configured == 0:
         raise RuntimeError("No MongoDB database is configured")
@@ -288,7 +245,6 @@ async def search_media(query, limit=None):
             "cannot be searched (" + ", ".join(errors) + ")"
         )
     return docs
-
 
 async def fuzzy_search_media(query, limit=80):
     """Cheap local fuzzy fallback modeled on Ultron's fuzzy search.
