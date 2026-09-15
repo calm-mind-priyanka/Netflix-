@@ -444,6 +444,89 @@ def _same_text(value, wanted):
     return normalize_for_search(value) == normalize_for_search(wanted)
 
 
+FILTER_LANGUAGES = ["Malayalam", "Tamil", "English", "Hindi", "Telugu", "Kannada", "Gujarati", "Marathi", "Punjabi"]
+FILTER_QUALITIES = ["360P", "480P", "720P", "1080P", "1440P", "2160P"]
+FILTER_SEASONS = [f"Season {i}" for i in range(1, 11)]
+
+
+def _best_file(variants):
+    def score(item):
+        q = int(re.search(r"\d+", str(item.get("quality") or "")) .group(0)) if re.search(r"\d+", str(item.get("quality") or "")) else 0
+        return (q, str(item.get("file_name") or "").casefold())
+    return sorted(variants, key=score, reverse=True)[0] if variants else None
+
+
+async def filter_options(request):
+    """Auto Filter-style predefined choices and real availability.
+
+    Choices are deliberately NOT derived from the database: the same fixed
+    language/quality/season buttons are always displayed. The database is
+    consulted only after a user selects a value, matching the bot's flow.
+    """
+    title_name = request.query.get("title", "").strip()
+    if not title_name:
+        raise web.HTTPBadRequest(text="A title is required")
+    target = await _load_grouped_title(title_name, request.query.get("id") or None)
+    if not target:
+        raise web.HTTPNotFound(text="Title not found")
+    variants = []
+    if target.get("type") == "series":
+        for season in target.get("seasons") or []:
+            for episode in season.get("episodes") or []:
+                variants.extend(episode.get("variants") or [])
+    else:
+        variants = list(target.get("variants") or [])
+    seasons = sorted({int(v["season"]) for v in variants if v.get("season") is not None})
+    episodes_by_season = {}
+    for v in variants:
+        if v.get("season") is not None and v.get("episode") is not None:
+            episodes_by_season.setdefault(int(v["season"]), set()).add(int(v["episode"]))
+    return web.json_response({
+        "ok": True,
+        "languages": FILTER_LANGUAGES,
+        "qualities": FILTER_QUALITIES,
+        "seasons": FILTER_SEASONS,
+        "available_seasons": seasons,
+        "episodes": {str(k): sorted(v) for k, v in episodes_by_season.items()},
+        "type": target.get("type"),
+    })
+
+
+async def filter_media(request):
+    """Resolve Auto Filter-style selection against the real title variants."""
+    title_name = request.query.get("title", "").strip()
+    if not title_name:
+        raise web.HTTPBadRequest(text="A title is required")
+    target = await _load_grouped_title(title_name, request.query.get("id") or None)
+    if not target:
+        return web.json_response({"ok": False, "error": "Title not found"}, status=404)
+    wanted = {
+        "year": int(request.query["year"]) if request.query.get("year", "").isdigit() else None,
+        "season": int(request.query["season"]) if request.query.get("season", "").isdigit() else None,
+        "episode": int(request.query["episode"]) if request.query.get("episode", "").isdigit() else None,
+        "quality": request.query.get("quality") or None,
+        "source": request.query.get("source") or None,
+        "language": request.query.get("language") or None,
+    }
+    variants = []
+    if target.get("type") == "series":
+        for season in target.get("seasons") or []:
+            for episode in season.get("episodes") or []:
+                variants.extend(episode.get("variants") or [])
+    else:
+        variants = list(target.get("variants") or [])
+    matches = [v for v in variants if v.get("file_id") and _variant_matches_request(v, wanted)]
+    # A series season alone is a valid filter context, but do not pretend it is
+    # an exact episode selection. The UI can continue to episode/quality/language.
+    return web.json_response({
+        "ok": bool(matches),
+        "count": len(matches),
+        "file": _best_file(matches),
+        "matches": matches[:20],
+        "error": None if matches else "NO FILES WERE FOUND",
+    }, status=200 if matches else 404)
+
+
 async def resolve(request):
     """Resolve one real Telegram file using independent metadata matching."""
     title_name = request.query.get("title", "").strip()
@@ -816,6 +899,8 @@ def create_app():
     app.router.add_get("/api/home", home)
     app.router.add_get("/api/search", search)
     app.router.add_get("/api/title/{id}", title)
+    app.router.add_get("/api/filter-options", filter_options)
+    app.router.add_get("/api/filter", filter_media)
     app.router.add_get("/api/resolve", resolve)
     app.router.add_get("/api/stream-token/{file_id}", token)
     app.router.add_get("/api/stream/{file_id}", stream)
