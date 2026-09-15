@@ -208,7 +208,7 @@ const Player={
       }else if(key==="subtitle"){
         const embedded=(this.tracks.subtitle_tracks||[]).find(t=>t.language===value);
         if(embedded) await this.selectEmbeddedSubtitle(value);
-        else { this.subtitle=value; await this.switchResolved(position,playing); }
+        else { this.subtitle=value; this.selectedSettings.subtitle=String(value); await this.switchResolved(position,playing); }
       }else{
         if(key==="audio"){this.audio=String(value);this.selectedSettings.audio=String(value);}
         if(key==="quality"){this.quality=String(value);this.selectedSettings.quality=String(value);}
