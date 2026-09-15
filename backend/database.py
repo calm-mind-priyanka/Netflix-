@@ -1,4 +1,5 @@
 import logging
+import re
 from motor.motor_asyncio import AsyncIOMotorClient
 from .config import (
     DATABASE_URI,
@@ -229,6 +230,23 @@ async def search_media(query, limit=None):
     search_filter = build_search_filter(query)
     if not search_filter:
         return []
+
+    # For web search, Mongo is only the candidate source; exact title/year/
+    # season/quality/language matching is performed by the catalog parser.
+    # When a title contains several words, an $and of regex clauses can force
+    # Mongo to repeatedly scan large unindexed collections. Use the first
+    # meaningful title token as the bounded candidate key instead. This keeps
+    # SEARCH_MAX_DOCS=1500 while avoiding a multiplicative regex workload.
+    raw_terms = [t for t in re.split(r"[^a-zA-Z0-9]+", str(query or "")) if len(t) >= 2]
+    if len(raw_terms) > 1:
+        token = raw_terms[0]
+        escaped = re.escape(token)
+        search_filter = {
+            "$or": [
+                {"file_name": {"$regex": escaped, "$options": "i"}},
+                {"caption": {"$regex": escaped, "$options": "i"}},
+            ]
+        }
 
     docs = []
     seen = set()
