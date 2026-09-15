@@ -61,14 +61,28 @@ TMDB_CACHE_TTL = 86400
 TMDB_SEMAPHORE = None
 TMDB_SESSION = None
 
+# Small in-process caches are important on Koyeb Free: repeated searches from
+# many users should not repeat the same MongoDB parsing work. These caches are
+# read-only and never write to the Auto Filter database.
+SEARCH_CACHE = OrderedDict()
+SEARCH_CACHE_TTL = 30
+SEARCH_CACHE_MAX = 256
+SEARCH_INFLIGHT = {}
+SEARCH_SEMAPHORE = asyncio.Semaphore(6)
+HOME_CACHE = None
+HOME_CACHE_TIME = 0.0
+
 # Keep homepage catalog work bounded. The website only needs enough recent
 # media records to build the visible homepage; it must never materialize the
 # entire bot collection in RAM on a small Koyeb instance.
 HOME_DOC_LIMIT = 300
 HOME_TITLE_LIMIT = 100
-HOME_ENRICH_LIMIT = 24
-SEARCH_ENRICH_LIMIT = 16
-TITLE_VARIANT_LIMIT = SEARCH_MAX_DOCS
+HOME_ENRICH_LIMIT = 8
+SEARCH_ENRICH_LIMIT = 6
+# Never let an environment value such as 10000 turn one HTTP request into a
+# huge in-memory MongoDB result set. The exact title can still have many real
+# variants; 1500 is a generous safety ceiling for a single web request.
+TITLE_VARIANT_LIMIT = min(max(500, int(SEARCH_MAX_DOCS)), 1500)
 
 # Maintenance is deliberately kept in memory. The website must not create or
 # modify a collection inside the Auto Filter Bot's MongoDB database.
@@ -76,27 +90,25 @@ MAINTENANCE = False
 
 
 async def all_titles(limit=None):
-    """Build a bounded catalog directly from MongoDB without a process-wide catalog cache."""
+    """Build the bounded homepage catalog, cached briefly in this process."""
+    global HOME_CACHE, HOME_CACHE_TIME
     if not DATABASE_URI:
         raise RuntimeError("DATABASE_URI is not configured")
 
-    projection = {
-        "_id": 1,
-        "file_id": 1,
-        "file_ref": 1,
-        "file_name": 1,
-        "file_size": 1,
-        "file_type": 1,
-        "mime_type": 1,
-        "caption": 1,
-    }
-
     requested = HOME_DOC_LIMIT if limit is None else int(limit)
-    # CATALOG_MAX_DOCS remains an operator setting, but a single homepage
-    # request is hard-capped so an accidental large environment value cannot
-    # turn into an OOM-sized in-memory catalog.
     bounded = max(1, min(requested, CATALOG_MAX_DOCS, HOME_DOC_LIMIT))
-    return await normalize_async(iter_media(projection=projection, limit=bounded))
+    now = time.time()
+    if bounded == HOME_DOC_LIMIT and HOME_CACHE is not None and now - HOME_CACHE_TIME < max(5, CATALOG_TTL):
+        return HOME_CACHE
+
+    projection = {
+        "_id": 1, "file_id": 1, "file_ref": 1, "file_name": 1,
+        "file_size": 1, "file_type": 1, "mime_type": 1, "caption": 1,
+    }
+    result = await normalize_async(iter_media(projection=projection, limit=bounded))
+    if bounded == HOME_DOC_LIMIT:
+        HOME_CACHE, HOME_CACHE_TIME = result, now
+    return result
 
 
 async def _tmdb_session():
@@ -216,15 +228,17 @@ def _search_score(item, query_title):
 
 
 async def home(request):
-    # Only the records needed to populate the visible homepage are parsed.
-    # TMDB is also limited to the number of unique cards the current UI can show.
     items = (await all_titles(limit=HOME_DOC_LIMIT))[:HOME_TITLE_LIMIT]
-    # Enrich every visible title, but cap concurrency so a small Koyeb instance
-    # never creates a burst of TMDB connections.
-    async def enrich_one(item):
-        return await enrich(item)
-    enriched = await asyncio.gather(*(enrich_one(item) for item in items))
-    return web.json_response({"ok": True, "items": enriched, "count": len(items)})
+    # Do not make the homepage wait for dozens of external TMDB requests.
+    # Preserve real caption posters, and enrich only a small visible prefix.
+    enriched = list(items)
+    targets = [i for i, item in enumerate(enriched) if not item.get("poster")][:HOME_ENRICH_LIMIT]
+    if targets and TMDB_API_KEY:
+        values = await asyncio.gather(*(enrich(enriched[i]) for i in targets), return_exceptions=True)
+        for i, value in zip(targets, values):
+            if not isinstance(value, Exception):
+                enriched[i] = value
+    return web.json_response({"ok": True, "items": enriched, "count": len(enriched)})
 
 
 def _norm_setting(value):
@@ -266,60 +280,110 @@ def _title_has_matching_variant(item, parsed):
     return any(_variant_matches_request(v, parsed) for v in (item.get("variants") or []))
 
 
+async def _search_uncached(query):
+    """Perform one protected search; callers share the result for 30 seconds."""
+    parsed = normalize_query(query)
+    search_title = parsed["title"] or query
+    async with SEARCH_SEMAPHORE:
+        docs = await search_media(search_title, limit=TITLE_VARIANT_LIMIT)
+        if not docs:
+            fuzzy_docs = await fuzzy_search_media(search_title, limit=40)
+            if fuzzy_docs:
+                fuzzy_parsed = parse_doc(fuzzy_docs[0])
+                docs = await search_media(fuzzy_parsed["title"], limit=TITLE_VARIANT_LIMIT)
+
+        items = normalize(docs)
+        candidates = []
+        for item in items:
+            if search_title_score(item["title"], search_title) < 0.68:
+                continue
+            if not _title_has_matching_variant(item, parsed):
+                continue
+            candidates.append(item)
+        candidates.sort(key=lambda item: (item["title"].casefold(), item.get("year") or 0))
+        selected = []
+        for item in candidates[:100]:
+            copy = dict(item)
+            if parsed["season"] is not None:
+                copy["search_season"] = parsed["season"]
+            if parsed["episode"] is not None:
+                copy["search_episode"] = parsed["episode"]
+            selected.append(copy)
+
+        # Search must not be held hostage by TMDB. Only a few cards without a
+        # real poster are enriched, and the rest return immediately.
+        if TMDB_API_KEY and selected:
+            targets = [i for i, item in enumerate(selected) if not item.get("poster")][:SEARCH_ENRICH_LIMIT]
+            if targets:
+                values = await asyncio.gather(*(enrich(selected[i]) for i in targets), return_exceptions=True)
+                for i, value in zip(targets, values):
+                    if not isinstance(value, Exception):
+                        selected[i] = value
+        return selected
+
+
 async def search(request):
-    """Search title first, then match requested metadata independently."""
     query = request.query.get("q", "").strip()
     if not query:
         return web.json_response({"ok": True, "items": [], "count": 0})
-    parsed = normalize_query(query)
-    search_title = parsed["title"] or query
-    # Auto Filter-style: Mongo searches filename OR caption. Metadata such as
-    # season/episode/quality/language is then verified against every real file.
-    docs = await search_media(search_title, limit=TITLE_VARIANT_LIMIT)
-    if not docs:
-        # Ultron uses fuzzy matching as a fallback. We do the same, but only
-        # return documents that already exist in the Auto Filter database.
-        fuzzy_docs = await fuzzy_search_media(search_title, limit=min(80, TITLE_VARIANT_LIMIT))
-        if fuzzy_docs:
-            fuzzy_parsed = parse_doc(fuzzy_docs[0])
-            docs = await search_media(fuzzy_parsed["title"], limit=TITLE_VARIANT_LIMIT)
-    items = normalize(docs)
-    candidates = []
-    for item in items:
-        if search_title_score(item["title"], search_title) < 0.68:
-            continue
-        if not _title_has_matching_variant(item, parsed):
-            continue
-        candidates.append(item)
-    candidates.sort(key=lambda item: (item["title"].casefold(), item.get("year") or 0))
-    selected = []
-    for item in candidates[:100]:
-        copy = dict(item)
-        if parsed["season"] is not None:
-            copy["search_season"] = parsed["season"]
-        if parsed["episode"] is not None:
-            copy["search_episode"] = parsed["episode"]
-        selected.append(copy)
-    enriched = await asyncio.gather(*(enrich(item) for item in selected))
-    return web.json_response({"ok": True, "items": enriched, "count": len(selected)})
+
+    key = normalize_for_search(query) or query.casefold()
+    now = time.time()
+    cached = SEARCH_CACHE.get(key)
+    if cached and now - cached[0] < SEARCH_CACHE_TTL:
+        SEARCH_CACHE.move_to_end(key)
+        return web.json_response({"ok": True, "items": cached[1], "count": len(cached[1]), "cached": True})
+
+    # Single-flight: 100 users asking for the same title at once share one
+    # database search instead of creating 100 identical MongoDB scans.
+    task = SEARCH_INFLIGHT.get(key)
+    if task is None:
+        task = asyncio.create_task(_search_uncached(query))
+        SEARCH_INFLIGHT[key] = task
+    try:
+        selected = await task
+    finally:
+        if SEARCH_INFLIGHT.get(key) is task:
+            SEARCH_INFLIGHT.pop(key, None)
+
+    SEARCH_CACHE[key] = (time.time(), selected)
+    SEARCH_CACHE.move_to_end(key)
+    while len(SEARCH_CACHE) > SEARCH_CACHE_MAX:
+        SEARCH_CACHE.popitem(last=False)
+    return web.json_response({"ok": True, "items": selected, "count": len(selected)})
+
+
+async def _cached_or_search_items(query):
+    """Reuse a recent grouped search result for title/resolve requests."""
+    key = normalize_for_search(query) or str(query).casefold()
+    cached = SEARCH_CACHE.get(key)
+    if cached and time.time() - cached[0] < SEARCH_CACHE_TTL:
+        SEARCH_CACHE.move_to_end(key)
+        return cached[1]
+    task = SEARCH_INFLIGHT.get(key)
+    if task is None:
+        task = asyncio.create_task(_search_uncached(query))
+        SEARCH_INFLIGHT[key] = task
+    try:
+        result = await task
+    finally:
+        if SEARCH_INFLIGHT.get(key) is task:
+            SEARCH_INFLIGHT.pop(key, None)
+    SEARCH_CACHE[key] = (time.time(), result)
+    SEARCH_CACHE.move_to_end(key)
+    while len(SEARCH_CACHE) > SEARCH_CACHE_MAX:
+        SEARCH_CACHE.popitem(last=False)
+    return result
 
 
 async def title(request):
     title_id = request.match_info["id"]
     requested_name = request.query.get("q", "").strip()
 
-    # First try the bounded homepage set. When the browser supplies the title
-    # name, do a targeted MongoDB search so titles outside the homepage window
-    # can still resolve all of their matching file variants.
-    for item in await all_titles(limit=HOME_DOC_LIMIT):
-        if item["id"] == title_id:
-            if requested_name:
-                break
-            return web.json_response({"ok": True, **await enrich(item)})
-
+    # When the browser supplies the title name, go directly to the targeted
+    # MongoDB search. Do not scan/re-parse the homepage first.
     if requested_name:
-        docs = await search_media(requested_name, limit=TITLE_VARIANT_LIMIT)
-        grouped = normalize(docs)
+        grouped = await _cached_or_search_items(requested_name)
         target = next((item for item in grouped if item["id"] == title_id), None)
         if target:
             return web.json_response({"ok": True, **await enrich(target)})
@@ -351,8 +415,20 @@ async def resolve(request):
         "source": request.query.get("source", "").strip() or None,
         "language": request.query.get("audio", "").strip() or None,
     }
-    docs = await search_media(title_name, limit=TITLE_VARIANT_LIMIT)
-    parsed = [parse_doc(doc) for doc in docs if doc.get("_id") is not None or doc.get("file_id")]
+    cached_items = await _cached_or_search_items(title_name)
+    # The grouped search result already contains the real variants. Resolve
+    # from it when possible, avoiding another MongoDB query for the same title.
+    grouped_target = next((item for item in cached_items if item.get("title") and search_title_score(item["title"], title_name) >= 0.68), None)
+    if grouped_target:
+        parsed = []
+        if grouped_target.get("type") == "series":
+            for season_item in grouped_target.get("seasons") or []:
+                for episode_item in season_item.get("episodes") or []:
+                    parsed.extend(episode_item.get("variants") or [])
+        else:
+            parsed = list(grouped_target.get("variants") or [])
+    else:
+        parsed = []
     candidates = []
     for item in parsed:
         if wanted_type and item["type"] != wanted_type:
