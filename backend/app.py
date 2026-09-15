@@ -78,8 +78,8 @@ HOME_CACHE_TIME = 0.0
 # entire bot collection in RAM on a small Koyeb instance.
 HOME_DOC_LIMIT = 300
 HOME_TITLE_LIMIT = 100
-HOME_ENRICH_LIMIT = 8
-SEARCH_ENRICH_LIMIT = 2
+HOME_ENRICH_LIMIT = 100
+SEARCH_ENRICH_LIMIT = 50
 # Never let an environment value such as 10000 turn one HTTP request into a
 # huge in-memory MongoDB result set. The exact title can still have many real
 # variants; 300 is the default/safety ceiling for a single web request on Koyeb Free.
@@ -118,7 +118,7 @@ async def _tmdb_session():
     if TMDB_SESSION is None or TMDB_SESSION.closed:
         TMDB_SESSION = ClientSession(timeout=ClientTimeout(total=8))
     if TMDB_SEMAPHORE is None:
-        TMDB_SEMAPHORE = asyncio.Semaphore(2)
+        TMDB_SEMAPHORE = asyncio.Semaphore(8)
     return TMDB_SESSION, TMDB_SEMAPHORE
 
 
@@ -231,8 +231,9 @@ def _search_score(item, query_title):
 
 async def home(request):
     items = (await all_titles(limit=HOME_DOC_LIMIT))[:HOME_TITLE_LIMIT]
-    # Do not make the homepage wait for dozens of external TMDB requests.
-    # Preserve real caption posters, and enrich only a small visible prefix.
+    # Preserve real caption posters and enrich every visible item that is
+    # missing one. TMDB results are cached for a day, so repeat home loads do
+    # not repeat the external requests.
     enriched = list(items)
     targets = [i for i, item in enumerate(enriched) if not item.get("poster")][:HOME_ENRICH_LIMIT]
     if targets and TMDB_API_KEY:
@@ -282,82 +283,128 @@ def _title_has_matching_variant(item, parsed):
     return any(_variant_matches_request(v, parsed) for v in (item.get("variants") or []))
 
 
-async def _search_uncached(query):
-    """Perform one protected search; callers share the result for 30 seconds."""
-    parsed = normalize_query(query)
-    search_title = parsed["title"] or query
+
+# Keep this list identical to the IGNORE_WORDS used by the supplied Ultron bot.
+ULTRON_IGNORE_WORDS = [
+    "movies", "movie", "episode", "episodes", "south indian", "south indian movie",
+    "south movie", "web-series", "web series", "webseries", "hindi me bhejo", "ful",
+    ",", "!", "kro", "jaldi", "audio", "language", "mkv", "mp4", "web", "series",
+    "hollywood", "all", "bollywood", "south", "hd", "karo", "upload", "bhejo",
+    "fullepisode", "please", "plz", "send", "link", "dabbed", "dubbed", "season",
+]
+
+def _autofilter_prepare_query(query):
+    """Use the same pre-search cleanup as the supplied Ultron bot."""
+    value = str(query or "").strip().lower()
+    # Ultron's replace_words removes whole ignore words, longest first.
+    words = sorted((w for w in ULTRON_IGNORE_WORDS if w), key=len, reverse=True)
+    if words:
+        pattern = r"\b(?:" + "|".join(re.escape(w) for w in words) + r")\b"
+        value = re.sub(pattern, "", value, flags=re.IGNORECASE)
+    value = value.replace("-", " ").replace(":", "").replace("'", "")
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _build_selected_query(base_query, season=None, episode=None, language=None, quality=None):
+    """Build a cumulative Auto Filter query without duplicating metadata tokens."""
+    parsed = normalize_query(base_query)
+    title = parsed.get("title") or base_query
+    parts = [title]
+    if parsed.get("year") is not None:
+        parts.append(str(parsed["year"]))
+    s = season if season is not None else parsed.get("season")
+    e = episode if episode is not None else parsed.get("episode")
+    if s is not None:
+        parts.append(f"S{int(s):02d}" + (f"E{int(e):02d}" if e is not None else ""))
+    elif e is not None:
+        parts.append(f"E{int(e):02d}")
+    if language:
+        parts.append(str(language))
+    if quality:
+        parts.append(str(quality))
+    return " ".join(str(x) for x in parts if str(x).strip())
+
+
+def _parsed_files(docs):
+    return [x for x in (parse_doc(doc) for doc in docs) if x.get("file_id") and not x.get("_parse_error")]
+
+
+def _file_sort_key(item):
+    match = re.search(r"\d+", str(item.get("quality") or ""))
+    quality = int(match.group(0)) if match else 0
+    return (quality, str(item.get("file_name") or "").casefold())
+
+
+async def _raw_autofilter_files(query, limit=None):
+    prepared = _autofilter_prepare_query(query)
+    if not prepared:
+        return []
+    bounded = SEARCH_CANDIDATE_LIMIT if limit is None else min(max(1, int(limit)), 1500)
     async with SEARCH_SEMAPHORE:
-        # First run the exact query against the raw Mongo records, just like
-        # Ultron Auto Filter.  This is important for queries such as
-        # "Reacher S05E07": the episode token is part of the searchable
-        # filename and must not be discarded before MongoDB gets a chance to
-        # match it.  We only fall back to the parsed title when the exact
-        # Auto Filter-style query returns nothing.
-        exact_query_docs = await search_media(query, limit=SEARCH_CANDIDATE_LIMIT)
-        docs = exact_query_docs
-        exact_query_matched = bool(exact_query_docs)
-        if not docs and search_title.casefold() != query.casefold():
+        docs = await search_media(prepared, limit=bounded)
+        if not docs:
+            parsed_query = normalize_query(prepared)
+            title = parsed_query.get("title") or prepared
+            docs = await search_media(title, limit=bounded)
+            if not docs and parsed_query.get("year") is None:
+                docs = await fuzzy_search_media(title, limit=min(40, bounded))
+        return await asyncio.to_thread(_parsed_files, docs)
+
+
+async def _search_uncached(query):
+    """Return raw file-level matches, using the supplied Ultron search pipeline.
+
+    The website must not normalize/group the raw matches before displaying the
+    search result. Grouping is useful for the catalog/detail pages, but it is
+    exactly what caused many Ultron file matches to collapse into 3-4 website
+    cards. The raw Mongo matches are therefore authoritative here.
+    """
+    prepared_query = _autofilter_prepare_query(query)
+    if not prepared_query:
+        return []
+
+    parsed = normalize_query(prepared_query)
+    search_title = parsed.get("title") or prepared_query
+
+    async with SEARCH_SEMAPHORE:
+        docs = await search_media(prepared_query, limit=SEARCH_CANDIDATE_LIMIT)
+        # Match Ultron's normal no-result fallback: search the cleaned title,
+        # then use fuzzy correction only when spell-check style recovery is needed.
+        if not docs and search_title.casefold() != prepared_query.casefold():
             docs = await search_media(search_title, limit=SEARCH_CANDIDATE_LIMIT)
-        # An explicit year is part of the user's movie identity. Never replace
-        # an exact-year search with a fuzzy title fallback, because that can
-        # turn e.g. "Dhurandhar 2025" into a different Dhurandhar-like title.
         if not docs and parsed.get("year") is None:
-            fuzzy_docs = await fuzzy_search_media(search_title, limit=40)
+            fuzzy_docs = await fuzzy_search_media(search_title, limit=min(40, SEARCH_CANDIDATE_LIMIT))
             if fuzzy_docs:
                 fuzzy_parsed = parse_doc(fuzzy_docs[0])
-                docs = await search_media(fuzzy_parsed["title"], limit=SEARCH_CANDIDATE_LIMIT)
+                docs = await search_media(fuzzy_parsed.get("title") or search_title, limit=SEARCH_CANDIDATE_LIMIT)
 
-        # Catalog parsing/grouping is CPU-heavy for large result sets. Keep it
-        # off aiohttp's event loop so a 1500-document search cannot starve the
-        # Koyeb health endpoint or unrelated HTTP requests.
-        items = await asyncio.to_thread(normalize, docs)
-        candidates = []
-        strict_identity = bool(parsed.get("year") is not None)
-        normalized_query_title = normalize_for_search(search_title)
-        for item in items:
-            normalized_item_title = normalize_for_search(item.get("title"))
-            # When the full user query itself matched MongoDB, trust that
-            # Auto Filter-style match. Do NOT apply the website's title scorer
-            # afterward, because that can discard a file that Ultron would
-            # return (for example: Reacher S05E07). The raw DB query is already
-            # the authoritative matching step.
-            #
-            # Only apply catalog-title identity checks when we had to fall back
-            # from the full query to the parsed title.
-            if not exact_query_matched:
-                if strict_identity:
-                    if normalized_item_title != normalized_query_title:
-                        continue
-                elif search_title_score(item["title"], search_title) < 0.68:
-                    continue
-            if not _title_has_matching_variant(item, parsed):
-                continue
-            candidates.append(item)
-        candidates.sort(key=lambda item: (item["title"].casefold(), item.get("year") or 0))
-        selected = []
-        for item in candidates[:50]:
-            copy = dict(item)
-            if parsed["season"] is not None:
-                copy["search_season"] = parsed["season"]
-            if parsed["episode"] is not None:
-                copy["search_episode"] = parsed["episode"]
-            selected.append(copy)
+    raw_items = await asyncio.to_thread(_parsed_files, docs)
+    if not raw_items:
+        return []
 
-        # Enrich only the visible search prefix. The previous build skipped
-        # TMDB entirely on search, which is why the API key could successfully
-        # provide descriptions on detail/home pages while search cards had no
-        # poster. Keep this bounded so Koyeb Free is not flooded with TMDB
-        # requests. Cached TMDB entries are effectively free.
-        if TMDB_API_KEY and selected:
-            enrich_limit = min(len(selected), SEARCH_ENRICH_LIMIT)
-            values = await asyncio.gather(
-                *(enrich(selected[i]) for i in range(enrich_limit)),
-                return_exceptions=True,
-            )
-            for i, value in enumerate(values):
-                if not isinstance(value, Exception):
-                    selected[i] = value
-        return selected
+    # Keep every raw file. Do not collapse by normalized title. This is the
+    # critical parity point with Ultron's get_search_results().
+    selected = []
+    for index, item in enumerate(raw_items):
+        copy = dict(item)
+        copy["id"] = f"file:{copy.get('file_id') or index}"
+        if parsed.get("season") is not None:
+            copy["search_season"] = parsed["season"]
+        if parsed.get("episode") is not None:
+            copy["search_episode"] = parsed["episode"]
+        selected.append(copy)
+
+    # Poster enrichment is presentation-only and never changes which files
+    # matched. Cache it aggressively and keep concurrency bounded.
+    if TMDB_API_KEY and selected:
+        values = await asyncio.gather(
+            *(enrich(item) for item in selected[:SEARCH_ENRICH_LIMIT]),
+            return_exceptions=True,
+        )
+        for i, value in enumerate(values):
+            if not isinstance(value, Exception):
+                selected[i] = value
+    return selected
 
 
 async def search(request):
@@ -509,39 +556,41 @@ async def filter_options(request):
 
 
 async def filter_media(request):
-    """Resolve Auto Filter-style selection against the real title variants."""
-    title_name = request.query.get("title", "").strip()
-    if not title_name:
-        raise web.HTTPBadRequest(text="A title is required")
-    target = await _load_grouped_title(title_name, request.query.get("id") or None)
-    if not target:
-        return web.json_response({"ok": False, "error": "Title not found"}, status=404)
-    wanted = {
-        "year": int(request.query["year"]) if request.query.get("year", "").isdigit() else None,
-        "season": int(request.query["season"]) if request.query.get("season", "").isdigit() else None,
-        "episode": int(request.query["episode"]) if request.query.get("episode", "").isdigit() else None,
-        "quality": request.query.get("quality") or None,
-        "source": request.query.get("source") or None,
-        "language": request.query.get("language") or None,
-    }
-    variants = []
-    if target.get("type") == "series":
-        for season in target.get("seasons") or []:
-            for episode in season.get("episodes") or []:
-                variants.extend(episode.get("variants") or [])
-    else:
-        variants = list(target.get("variants") or [])
-    matches = [v for v in variants if v.get("file_id") and _variant_matches_request(v, wanted)]
-    # A series season alone is a valid filter context, but do not pretend it is
-    # an exact episode selection. The UI can continue to episode/quality/language.
-    return web.json_response({
-        "ok": bool(matches),
-        "count": len(matches),
-        "file": _best_file(matches),
-        "matches": matches[:20],
-        "error": None if matches else "NO FILES WERE FOUND",
-    }, status=200 if matches else 404)
+    """Apply a selection to the WHOLE original search result set.
 
+    This deliberately works from the original search query rather than one
+    poster/title. It mirrors Ultron's BUTTONS flow: every new selection
+    refines the same search and MongoDB decides which real files remain.
+    """
+    query = request.query.get("q", "").strip()
+    if not query:
+        # Keep backwards compatibility with the title/detail flow.
+        query = request.query.get("title", "").strip()
+    if not query:
+        raise web.HTTPBadRequest(text="A search query is required")
+
+    try:
+        season = int(request.query["season"]) if request.query.get("season", "").isdigit() else None
+        episode = int(request.query["episode"]) if request.query.get("episode", "").isdigit() else None
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="Invalid season or episode") from exc
+
+    language = request.query.get("language", "").strip() or None
+    quality = request.query.get("quality", "").strip() or None
+    selected_query = _build_selected_query(query, season, episode, language, quality)
+    files = await _raw_autofilter_files(selected_query, limit=SEARCH_CANDIDATE_LIMIT)
+    files = [f for f in files if _variant_matches_request(f, {
+        "season": season, "episode": episode, "language": language, "quality": quality
+    })]
+    files.sort(key=_file_sort_key, reverse=True)
+    return web.json_response({
+        "ok": bool(files),
+        "count": len(files),
+        "file": files[0] if files else None,
+        "matches": files[:50],
+        "query": selected_query,
+        "error": None if files else "NO FILES WERE FOUND",
+    }, status=200 if files else 404)
 
 async def resolve(request):
     """Resolve one real Telegram file using independent metadata matching."""
@@ -871,7 +920,7 @@ async def startup(app):
 
     global TMDB_SESSION, TMDB_SEMAPHORE
     if TMDB_API_KEY:
-        TMDB_SESSION, TMDB_SEMAPHORE = ClientSession(timeout=ClientTimeout(total=8)), asyncio.Semaphore(2)
+        TMDB_SESSION, TMDB_SEMAPHORE = ClientSession(timeout=ClientTimeout(total=8)), asyncio.Semaphore(8)
         LOGGER.info("TMDB metadata enrichment enabled with bounded concurrency/cache")
 
     if telegram:
