@@ -78,26 +78,44 @@ const Player={
     if(v.episode!=null)this.episode=Number(v.episode);
   },
 
-  // These are UI choices, not database results. The site does not query the
-  // database to build these lists. A click on one of them triggers /api/resolve.
-  languageChoices(){return [
-    "Hindi","Tamil","English","Telugu","Malayalam","Kannada","Bengali","Bangla",
-    "Marathi","Punjabi","Gujarati","Bhojpuri","Korean","Spanish","French",
-    "German","Chinese","Japanese","Urdu"
-  ]},
-  qualityChoices(){return ["360p","480p","720p","1080p","1440p","2160p"]},
-  sourceChoices(){return [
-    "WEB-DL","WEBRip","BluRay","BRRip","BDRip","HDRip","HDTV","DVDRip",
-    "HDTC","HDTS","WEB-CAM","CAMRip","HDCAM","CAM","PreDB","Pre-DVD","WEB","REMUX"
-  ]},
-  seasonChoices(){return Array.from({length:20},(_,i)=>i+1)},
-  episodeChoices(){return Array.from({length:50},(_,i)=>i+1)},
+  // All player choices are derived only from real assets already present in the
+  // current logical title/episode. Nothing is fabricated from a fixed list.
+  languageChoices(){
+    const values=new Set();
+    for(const v of this.allVariants||[]){
+      for(const lang of this.variantAudio(v)) values.add(lang);
+    }
+    return [...values].sort((a,b)=>String(a).localeCompare(String(b)));
+  },
+  qualityChoices(){
+    return [...new Set((this.allVariants||[]).map(v=>v?.quality).filter(v=>v&&String(v).toLowerCase()!=="auto"))]
+      .sort((a,b)=>this.rankVariant({quality:b})-this.rankVariant({quality:a}));
+  },
+  sourceChoices(){
+    return [...new Set((this.allVariants||[]).map(v=>v?.source).filter(v=>v&&String(v).toLowerCase()!=="unknown"))]
+      .sort((a,b)=>String(a).localeCompare(String(b)));
+  },
+  seasonChoices(){
+    return [...new Set((this.allVariants||[]).map(v=>Number(v?.season)).filter(Number.isFinite))].sort((a,b)=>a-b);
+  },
+  episodeChoices(){
+    const season=Number(this.season);
+    return [...new Set((this.allVariants||[])
+      .filter(v=>Number(v?.season)===season)
+      .map(v=>Number(v?.episode))
+      .filter(Number.isFinite))].sort((a,b)=>a-b);
+  },
   allAudioLanguages(){return this.languageChoices()},
-  allSubtitles(){return [...new Set((this.tracks.subtitle_tracks||[]).map(t=>t.language).filter(x=>x&&x!=="Unknown"))]},
+  allSubtitles(){return [...new Set((this.allVariants||[]).flatMap(v=>this.variantSubs(v)).filter(x=>x&&x!=="Unknown"))]},
   allQualities(){return this.qualityChoices()},
   allSources(){return this.sourceChoices()},
   allSeasons(){return this.seasonChoices()},
-  episodesForSeason(_season){return this.episodeChoices()},
+  episodesForSeason(season){
+    return [...new Set((this.allVariants||[])
+      .filter(v=>Number(v?.season)===Number(season))
+      .map(v=>Number(v?.episode))
+      .filter(Number.isFinite))].sort((a,b)=>a-b);
+  },
 
   render(){
     const audio=this.allAudioLanguages();
@@ -111,8 +129,6 @@ const Player={
     html+=section("audio","Language / Audio",audio,this.audio);
     html+=section("quality","Quality",qualities,this.quality);
     html+=section("source","Source / Release",sources,this.source);
-    if(this.titleType==="series") html+=section("season","Season",seasons,this.season,v=>`S${String(v).padStart(2,"0")}`);
-    if(this.titleType==="series") html+=section("episode","Episode",this.episodesForSeason(this.season),this.episode,v=>`E${String(v).padStart(2,"0")}`);
     if(embeddedAudio.length) html+=section("audioTrack","Audio Track",embeddedAudio,this.audioTrack);
     if(embeddedSubs.length) html+=section("subtitleTrack","Subtitle Track",embeddedSubs,this.subtitleTrack);
     if(subs.length) html+=section("subtitle","Subtitle",subs,this.subtitle);
@@ -222,12 +238,25 @@ const Player={
         if(key==="season") {
           this.season=Number(value);
           this.selectedSettings.season=Number(value);
-          // Changing season starts a new season context; do not carry an
-          // episode from the previously playing season into the new search.
+          // A new season is a new catalog context. Do not carry a previous
+          // episode or media filters into it and accidentally hide its real assets.
           this.episode=null;
           delete this.selectedSettings.episode;
+          delete this.selectedSettings.quality;
+          delete this.selectedSettings.source;
+          delete this.selectedSettings.audio;
+          delete this.selectedSettings.subtitle;
         }
-        if(key==="episode"){this.episode=Number(value);this.selectedSettings.episode=Number(value);}
+        if(key==="episode"){
+          this.episode=Number(value);
+          this.selectedSettings.episode=Number(value);
+          // Selecting an episode should expose that episode's real assets.
+          // Quality/language/source can then be chosen from those assets.
+          delete this.selectedSettings.quality;
+          delete this.selectedSettings.source;
+          delete this.selectedSettings.audio;
+          delete this.selectedSettings.subtitle;
+        }
         await this.switchResolved(position,playing);
       }
       document.getElementById("menu").classList.add("hidden");
@@ -241,9 +270,8 @@ const Player={
 
   async switchResolved(position,playing){
     const file=await this.resolveExact();
-    // The resolver returns one real database file only after the click.
-    // Keep it as the current playback target; do not build a variant catalog.
-    this.variants=[file];
+    // Keep the complete real asset catalog. The resolved file is only the
+    // current playback target; it must never replace the other real choices.
     await this.select(file,position,playing);
     this.setVariantSettings(file);
     await this.loadTracks(file);
