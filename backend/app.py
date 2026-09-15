@@ -21,6 +21,7 @@ from .config import (
     ADMIN_USERNAME,
     CATALOG_MAX_DOCS,
     CATALOG_TTL,
+    SEARCH_MAX_DOCS,
     COLLECTION_NAME,
     DATABASE_NAME,
     DATABASE_URI,
@@ -39,6 +40,7 @@ from .database import (
     iter_media,
     search_media,
     search_media_by_title,
+    fuzzy_search_media,
 )
 from .parser import (
     normalize,
@@ -66,7 +68,7 @@ HOME_DOC_LIMIT = 300
 HOME_TITLE_LIMIT = 100
 HOME_ENRICH_LIMIT = 24
 SEARCH_ENRICH_LIMIT = 16
-TITLE_VARIANT_LIMIT = 500
+TITLE_VARIANT_LIMIT = SEARCH_MAX_DOCS
 
 # Maintenance is deliberately kept in memory. The website must not create or
 # modify a collection inside the Auto Filter Bot's MongoDB database.
@@ -245,10 +247,10 @@ def _variant_matches_request(variant, parsed):
     wanted_source = parsed.get("source")
     if wanted_source and _norm_setting(variant.get("source")) != _norm_setting(wanted_source):
         return False
-    wanted_language = parsed.get("language")
-    if wanted_language:
+    wanted_languages = parsed.get("languages") or ([parsed.get("language")] if parsed.get("language") else [])
+    if wanted_languages:
         languages = {str(x).casefold() for x in (variant.get("audio_languages") or variant.get("languages") or [])}
-        if wanted_language.casefold() not in languages:
+        if any(str(w).casefold() not in languages for w in wanted_languages):
             return False
     return True
 
@@ -270,13 +272,21 @@ async def search(request):
     if not query:
         return web.json_response({"ok": True, "items": [], "count": 0})
     parsed = normalize_query(query)
-    # MongoDB receives only the title. Year/language/quality/season/episode/source
-    # are matched against parsed records, never against exact caption wording.
-    docs = await search_media(parsed["title"] or query, limit=TITLE_VARIANT_LIMIT)
+    search_title = parsed["title"] or query
+    # Auto Filter-style: Mongo searches filename OR caption. Metadata such as
+    # season/episode/quality/language is then verified against every real file.
+    docs = await search_media(search_title, limit=TITLE_VARIANT_LIMIT)
+    if not docs:
+        # Ultron uses fuzzy matching as a fallback. We do the same, but only
+        # return documents that already exist in the Auto Filter database.
+        fuzzy_docs = await fuzzy_search_media(search_title, limit=min(80, TITLE_VARIANT_LIMIT))
+        if fuzzy_docs:
+            fuzzy_parsed = parse_doc(fuzzy_docs[0])
+            docs = await search_media(fuzzy_parsed["title"], limit=TITLE_VARIANT_LIMIT)
     items = normalize(docs)
     candidates = []
     for item in items:
-        if search_title_score(item["title"], parsed["title"] or query) < 0.72:
+        if search_title_score(item["title"], search_title) < 0.68:
             continue
         if not _title_has_matching_variant(item, parsed):
             continue
@@ -428,7 +438,7 @@ async def download(request):
 
 
 async def health(request):
-    return web.json_response({"ok": True})
+    return web.json_response({"ok": True, "tmdb_configured": bool(TMDB_API_KEY), "search_caption_enabled": True})
 
 
 def _set_status(request, name, configured):
