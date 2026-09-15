@@ -252,8 +252,9 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
         (season,seasonIndex)=>`<section>
           <h2>Season ${season.season}</h2>
 
-          ${(season.episodes||[]).filter(episode=>preferredEpisode==null||episode.episode===preferredEpisode).map(
+          ${(season.episodes||[]).map(
             (episode,episodeIndex)=>{
+              const highlighted=preferredEpisode!=null && episode.episode===preferredEpisode;
 
               const nextEpisode=
                 season.episodes?.[episodeIndex+1];
@@ -277,8 +278,8 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
                     }
                   :null;
 
-              return `<div class="episode">
-                <span>Episode ${episode.episode}</span>
+              return `<div class="episode ${highlighted?"search-highlight":""}">
+                <span>Episode ${episode.episode}${highlighted?" ← selected":""}</span>
 
                 <button
                   class="primary episodePlay"
