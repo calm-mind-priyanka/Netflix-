@@ -301,7 +301,7 @@ class Streamer:
                 "-of", "json", "-i", "pipe:0",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
             sent = 0
             max_probe = 16 * 1024 * 1024
@@ -423,7 +423,7 @@ class Streamer:
 
         properties = await self.properties(file_id)
         try:
-            await asyncio.wait_for(self.transcode_slots.acquire(), timeout=5)
+            await asyncio.wait_for(self.transcode_slots.acquire(), timeout=20)
         except asyncio.TimeoutError as exc:
             raise web.HTTPServiceUnavailable(
                 text="A compatibility stream is already running. Please try again shortly."
@@ -472,16 +472,18 @@ class Streamer:
                 if not data:
                     break
                 await response.write(data)
+            stderr_data = await process.stderr.read() if process.stderr is not None else b""
             code = await process.wait()
             if code != 0:
-                raise RuntimeError(f"FFmpeg exited with status {code}")
+                detail = stderr_data.decode("utf-8", "replace").strip()[-1200:]
+                raise RuntimeError(f"FFmpeg exited with status {code}: {detail}")
 
             try:
                 await response.write_eof()
-            except (ConnectionResetError, BrokenPipeError, ClientConnectionError, asyncio.CancelledError):
+            except (ConnectionError, ConnectionResetError, BrokenPipeError, ClientConnectionError, asyncio.CancelledError):
                 pass
             return response
-        except (ConnectionResetError, BrokenPipeError):
+        except (ConnectionError, ConnectionResetError, BrokenPipeError, ClientConnectionError, asyncio.CancelledError):
             if feeder is not None:
                 feeder.cancel()
             if process is not None and process.returncode is None:
@@ -617,7 +619,8 @@ class Streamer:
         await response.prepare(request)
         try:
             await write_body(response)
-        except (ConnectionResetError, BrokenPipeError, ClientConnectionError, asyncio.CancelledError):
+        except (ConnectionError, ConnectionResetError, BrokenPipeError, ClientConnectionError, asyncio.CancelledError):
+            LOGGER.info("Client disconnected while streaming file %s", file_id)
             return response
         except Exception:
             LOGGER.exception("Telegram streaming failed for file %s", file_id)
