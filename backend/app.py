@@ -41,6 +41,7 @@ from .database import (
     search_media,
     search_media_by_title,
     fuzzy_search_media,
+    search_media_with_filters,
 )
 from .parser import (
     normalize,
@@ -305,26 +306,6 @@ def _autofilter_prepare_query(query):
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _build_selected_query(base_query, season=None, episode=None, language=None, quality=None):
-    """Build a cumulative Auto Filter query without duplicating metadata tokens."""
-    parsed = normalize_query(base_query)
-    title = parsed.get("title") or base_query
-    parts = [title]
-    if parsed.get("year") is not None:
-        parts.append(str(parsed["year"]))
-    s = season if season is not None else parsed.get("season")
-    e = episode if episode is not None else parsed.get("episode")
-    if s is not None:
-        parts.append(f"S{int(s):02d}" + (f"E{int(e):02d}" if e is not None else ""))
-    elif e is not None:
-        parts.append(f"E{int(e):02d}")
-    if language:
-        parts.append(str(language))
-    if quality:
-        parts.append(str(quality))
-    return " ".join(str(x) for x in parts if str(x).strip())
-
-
 def _parsed_files(docs):
     return [x for x in (parse_doc(doc) for doc in docs) if x.get("file_id") and not x.get("_parse_error")]
 
@@ -335,14 +316,14 @@ def _file_sort_key(item):
     return (quality, str(item.get("file_name") or "").casefold())
 
 
-async def _raw_autofilter_files(query, limit=None):
+async def _raw_autofilter_files(query, limit=None, allow_fuzzy=True):
     prepared = _autofilter_prepare_query(query)
     if not prepared:
         return []
     bounded = SEARCH_CANDIDATE_LIMIT if limit is None else min(max(1, int(limit)), 1500)
     async with SEARCH_SEMAPHORE:
         docs = await search_media(prepared, limit=bounded)
-        if not docs:
+        if not docs and allow_fuzzy:
             parsed_query = normalize_query(prepared)
             title = parsed_query.get("title") or prepared
             docs = await search_media(title, limit=bounded)
@@ -367,16 +348,16 @@ async def _search_uncached(query):
     search_title = parsed.get("title") or prepared_query
 
     async with SEARCH_SEMAPHORE:
-        docs = await search_media(prepared_query, limit=SEARCH_CANDIDATE_LIMIT)
+        docs = await search_media(prepared_query, limit=SEARCH_MAX_DOCS)
         # Match Ultron's normal no-result fallback: search the cleaned title,
         # then use fuzzy correction only when spell-check style recovery is needed.
         if not docs and search_title.casefold() != prepared_query.casefold():
-            docs = await search_media(search_title, limit=SEARCH_CANDIDATE_LIMIT)
+            docs = await search_media(search_title, limit=SEARCH_MAX_DOCS)
         if not docs and parsed.get("year") is None:
             fuzzy_docs = await fuzzy_search_media(search_title, limit=min(40, SEARCH_CANDIDATE_LIMIT))
             if fuzzy_docs:
                 fuzzy_parsed = parse_doc(fuzzy_docs[0])
-                docs = await search_media(fuzzy_parsed.get("title") or search_title, limit=SEARCH_CANDIDATE_LIMIT)
+                docs = await search_media(fuzzy_parsed.get("title") or search_title, limit=SEARCH_MAX_DOCS)
 
     raw_items = await asyncio.to_thread(_parsed_files, docs)
     if not raw_items:
@@ -520,52 +501,56 @@ def _best_file(variants):
 
 
 async def filter_options(request):
-    """Auto Filter-style predefined choices and real availability.
+    """Return filter choices for the ORIGINAL raw search result set.
 
-    Choices are deliberately NOT derived from the database: the same fixed
-    language/quality/season buttons are always displayed. The database is
-    consulted only after a user selects a value, matching the bot's flow.
+    The filter engine is intentionally query-based like Ultron: the website
+    never opens a poster/title and then searches only that grouped record.
     """
-    title_name = request.query.get("title", "").strip()
-    if not title_name:
-        raise web.HTTPBadRequest(text="A title is required")
-    target = await _load_grouped_title(title_name, request.query.get("id") or None)
-    if not target:
-        raise web.HTTPNotFound(text="Title not found")
-    variants = []
-    if target.get("type") == "series":
-        for season in target.get("seasons") or []:
-            for episode in season.get("episodes") or []:
-                variants.extend(episode.get("variants") or [])
-    else:
-        variants = list(target.get("variants") or [])
-    seasons = sorted({int(v["season"]) for v in variants if v.get("season") is not None})
+    query = request.query.get("q", "").strip()
+    if not query:
+        query = request.query.get("title", "").strip()
+    if not query:
+        raise web.HTTPBadRequest(text="A search query is required")
+
+    files = await _raw_autofilter_files(
+        query,
+        limit=SEARCH_MAX_DOCS,
+        allow_fuzzy=False,
+    )
+    if not files:
+        raise web.HTTPNotFound(text="No files found for this search")
+
+    seasons = sorted({
+        int(v["season"]) for v in files
+        if v.get("season") is not None
+    })
     episodes_by_season = {}
-    for v in variants:
+    for v in files:
         if v.get("season") is not None and v.get("episode") is not None:
             episodes_by_season.setdefault(int(v["season"]), set()).add(int(v["episode"]))
+
+    # Ultron presents the same predefined language/quality choices.  Season and
+    # episode availability, however, is derived from the actual raw files.
     return web.json_response({
         "ok": True,
         "languages": FILTER_LANGUAGES,
         "qualities": FILTER_QUALITIES,
-        "seasons": FILTER_SEASONS,
+        "seasons": [f"Season {s}" for s in seasons] or FILTER_SEASONS,
         "available_seasons": seasons,
         "episodes": {str(k): sorted(v) for k, v in episodes_by_season.items()},
-        "type": target.get("type"),
+        "type": "series" if any(v.get("season") is not None or v.get("episode") is not None for v in files) else "movie",
+        "raw_count": len(files),
     })
 
 
 async def filter_media(request):
-    """Apply a selection to the WHOLE original search result set.
+    """Apply cumulative filters against the same raw Auto Filter search.
 
-    This deliberately works from the original search query rather than one
-    poster/title. It mirrors Ultron's BUTTONS flow: every new selection
-    refines the same search and MongoDB decides which real files remain.
+    MongoDB performs the actual narrowing through the same filename/caption
+    regex search used by the bot.  No grouped title card is used as the source
+    of truth and no frontend-only filtering is trusted.
     """
     query = request.query.get("q", "").strip()
-    if not query:
-        # Keep backwards compatibility with the title/detail flow.
-        query = request.query.get("title", "").strip()
     if not query:
         raise web.HTTPBadRequest(text="A search query is required")
 
@@ -577,18 +562,42 @@ async def filter_media(request):
 
     language = request.query.get("language", "").strip() or None
     quality = request.query.get("quality", "").strip() or None
-    selected_query = _build_selected_query(query, season, episode, language, quality)
-    files = await _raw_autofilter_files(selected_query, limit=SEARCH_CANDIDATE_LIMIT)
-    files = [f for f in files if _variant_matches_request(f, {
-        "season": season, "episode": episode, "language": language, "quality": quality
-    })]
+
+    # A filter selection is an AND against the ORIGINAL query in MongoDB.
+    # This is the key Auto Filter parity point: the grouped title/detail
+    # catalogue is never used as the filter source.
+    prepared_base = _autofilter_prepare_query(query)
+    files = await search_media_with_filters(
+        prepared_base,
+        season=season,
+        episode=episode,
+        language=language,
+        quality=quality,
+        limit=SEARCH_MAX_DOCS,
+    )
+    files = await asyncio.to_thread(_parsed_files, files)
     files.sort(key=_file_sort_key, reverse=True)
+
+    # Only a unique raw match becomes playable.  Multiple remaining files are
+    # returned as candidates so the UI can ask for another filter rather than
+    # silently choosing an arbitrary release.
+    exact_file = files[0] if len(files) == 1 else None
+    selected_query = " ".join(
+        part for part in [
+            prepared_base,
+            f"S{season:02d}" if season is not None else "",
+            f"E{episode:02d}" if episode is not None else "",
+            language or "",
+            quality or "",
+        ] if str(part).strip()
+    )
     return web.json_response({
         "ok": bool(files),
         "count": len(files),
-        "file": files[0] if files else None,
+        "file": exact_file,
         "matches": files[:50],
         "query": selected_query,
+        "exact": len(files) == 1,
         "error": None if files else "NO FILES WERE FOUND",
     }, status=200 if files else 404)
 
