@@ -1,5 +1,5 @@
 const Player={
-  variants:[], allVariants:[], current:null, titleId:null, titleName:null, titleType:null,
+  variants:[], allVariants:[], current:null, titleId:null, titleName:null, titleType:null, titleYear:null,
   variant:null, audio:null, audioTrack:null, subtitle:null, subtitleTrack:null, quality:null, source:null,
   season:null, episode:null, menuSection:null,
   tracks:{audio_tracks:[],subtitle_tracks:[]}, subtitleUrl:null, switchBusy:false,
@@ -9,6 +9,7 @@ const Player={
     this.titleId=String(titleId);
     this.titleName=String(context.title||label||"").replace(/\s+•\s+S\d+\s+E\d+$/i,"").trim();
     this.titleType=context.type||"movie";
+    this.titleYear=context.year??null;
     this.season=context.season??null;
     this.episode=context.episode??null;
     // Keep only the files already supplied for the item being opened.
@@ -48,7 +49,7 @@ const Player={
         titleId,
         `${next.title} • S${String(next.season).padStart(2,"0")} E${String(next.episode).padStart(2,"0")}`,
         next.variants,next.next||null,
-        {title:next.title,type:"series",season:next.season,episode:next.episode}
+        {title:next.title,type:"series",year:next.year??this.titleYear,season:next.season,episode:next.episode}
       );
     }else nextButton.classList.add("hidden");
   },
@@ -180,6 +181,7 @@ const Player={
     const params=new URLSearchParams({
       title:this.titleName,
       type:this.titleType,
+      ...(this.titleYear!=null?{year:String(this.titleYear)}:{}),
       ...(selected.season!=null?{season:String(selected.season)}:{}),
       ...(selected.episode!=null?{episode:String(selected.episode)}:{}),
       ...(selected.quality?{quality:String(selected.quality)}:{}),
@@ -213,7 +215,14 @@ const Player={
         if(key==="audio"){this.audio=String(value);this.selectedSettings.audio=String(value);}
         if(key==="quality"){this.quality=String(value);this.selectedSettings.quality=String(value);}
         if(key==="source"){this.source=String(value);this.selectedSettings.source=String(value);}
-        if(key==="season"){this.season=Number(value);this.selectedSettings.season=Number(value);}
+        if(key==="season") {
+          this.season=Number(value);
+          this.selectedSettings.season=Number(value);
+          // Changing season starts a new season context; do not carry an
+          // episode from the previously playing season into the new search.
+          this.episode=null;
+          delete this.selectedSettings.episode;
+        }
         if(key==="episode"){this.episode=Number(value);this.selectedSettings.episode=Number(value);}
         await this.switchResolved(position,playing);
       }
