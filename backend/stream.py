@@ -12,6 +12,7 @@ from collections import OrderedDict
 from types import SimpleNamespace
 
 from aiohttp import web
+from aiohttp.client_exceptions import ClientConnectionError
 from pyrogram import Client, raw, utils
 from pyrogram.errors import AuthBytesInvalid
 from pyrogram.file_id import FileId, FileType, ThumbnailSource
@@ -311,7 +312,7 @@ class Streamer:
                 try:
                     process.stdin.write(chunk)
                     await process.stdin.drain()
-                except (BrokenPipeError, ConnectionResetError):
+                except (BrokenPipeError, ConnectionResetError, ClientConnectionError):
                     return {"audio_tracks": [], "subtitle_tracks": [], "available": False}
                 sent += len(chunk)
                 # Containers normally expose stream headers very early. Give
@@ -477,7 +478,7 @@ class Streamer:
 
             try:
                 await response.write_eof()
-            except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
+            except (ConnectionResetError, BrokenPipeError, ClientConnectionError, asyncio.CancelledError):
                 pass
             return response
         except (ConnectionResetError, BrokenPipeError):
@@ -616,7 +617,7 @@ class Streamer:
         await response.prepare(request)
         try:
             await write_body(response)
-        except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
+        except (ConnectionResetError, BrokenPipeError, ClientConnectionError, asyncio.CancelledError):
             return response
         except Exception:
             LOGGER.exception("Telegram streaming failed for file %s", file_id)
@@ -627,7 +628,7 @@ class Streamer:
         finally:
             try:
                 await response.write_eof()
-            except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
+            except (ConnectionResetError, BrokenPipeError, ClientConnectionError, asyncio.CancelledError):
                 pass
 
         return response
