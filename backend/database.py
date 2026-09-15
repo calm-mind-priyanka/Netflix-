@@ -246,6 +246,108 @@ async def search_media(query, limit=None):
         )
     return docs
 
+
+def _raw_field_constraint(pattern):
+    return {
+        "$or": [
+            {"file_name": {"$regex": pattern, "$options": "i"}},
+            {"caption": {"$regex": pattern, "$options": "i"}},
+        ]
+    }
+
+
+def _season_constraint(season):
+    n = int(season)
+    return _raw_field_constraint(
+        rf"(?:\b|[\.\+\-_])(?:s0*{n}|season\s*0*{n})(?:e(?:p(?:isode)?)?\s*0*\d+)?(?:\b|[\.\+\-_])"
+    )
+
+
+def _episode_constraint(episode):
+    n = int(episode)
+    return _raw_field_constraint(
+        rf"(?:\b|[\.\+\-_])(?:(?:s0*\d+|season\s*0*\d+)\s*e(?:p(?:isode)?)?\s*0*{n}|"
+        rf"e(?:p(?:isode)?)?\s*0*{n}|episode\s*0*{n}|\d+\s*x\s*0*{n})(?:\b|[\.\+\-_])"
+    )
+
+
+async def search_media_with_filters(
+    query,
+    *,
+    season=None,
+    episode=None,
+    language=None,
+    quality=None,
+    limit=1500,
+):
+    """Filter the ORIGINAL Auto Filter result set in MongoDB.
+
+    The first constraint is the exact Ultron-style filename/caption search for
+    the user's original query. Additional constraints are ANDed against the
+    same raw fields. This is cumulative filtering without grouped catalog
+    records, Python-only filtering, or fuzzy substitutions.
+    """
+    base = build_search_filter(str(query or "").strip())
+    if not base:
+        return []
+
+    constraints = [base]
+    if season is not None:
+        constraints.append(_season_constraint(season))
+    if episode is not None:
+        constraints.append(_episode_constraint(episode))
+    if language:
+        token = r"(?:\b|[\.\+\-_])" + re.escape(str(language).strip()) + r"(?:\b|[\.\+\-_])"
+        constraints.append(_raw_field_constraint(token))
+    if quality:
+        q = str(quality).strip()
+        q_token = q[:-1] if q.lower().endswith("p") else q
+        token = r"(?:\b|[\.\+\-_])" + re.escape(q_token) + r"p?(?:\b|[\.\+\-_])"
+        constraints.append(_raw_field_constraint(token))
+
+    mongo_filter = constraints[0] if len(constraints) == 1 else {"$and": constraints}
+    bounded = max(1, min(int(limit), 1500))
+    projection = dict(_SEARCH_PROJECTION)
+
+    docs = []
+    seen = set()
+    configured = 0
+    succeeded = 0
+    errors = []
+
+    for name, collection in (("primary", media), ("secondary", media2)):
+        if collection is None or len(docs) >= bounded:
+            continue
+        configured += 1
+        remaining = bounded - len(docs)
+        try:
+            rows = await (
+                collection.find(mongo_filter, projection)
+                .sort("$natural", -1)
+                .limit(remaining)
+                .to_list(length=remaining)
+            )
+            succeeded += 1
+            for doc in rows:
+                key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                docs.append(doc)
+        except Exception as exc:
+            errors.append(f"{name}: {type(exc).__name__}")
+            LOGGER.warning("%s MongoDB filtered search failed: %s", name, type(exc).__name__)
+
+    if configured == 0:
+        raise RuntimeError("No MongoDB database is configured")
+    if succeeded == 0:
+        raise RuntimeError(
+            "All configured MongoDB databases are unreachable or the collection "
+            "cannot be searched (" + ", ".join(errors) + ")"
+        )
+    return docs
+
 async def fuzzy_search_media(query, limit=80):
     """Cheap local fuzzy fallback modeled on Ultron's fuzzy search.
 
