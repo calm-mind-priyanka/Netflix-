@@ -145,8 +145,60 @@ async def find_media(file_id, projection=None):
     return None
 
 
+def _search_term_pattern(term):
+    """Return a Mongo regex that mirrors Auto Filter style metadata matching.
+
+    The bot accepts common human/release naming variations such as S05 vs
+    Season 5, E06 vs Episode 6, 1080 vs 1080p, and WEB-DL vs WEB DL/WEBDL.
+    Title words remain literal so unrelated titles are not pulled in.
+    """
+    import re
+
+    value = str(term or "").strip()
+    low = value.casefold()
+    m = re.fullmatch(r"s(?:eason)?[-_. ]*0*(\d{1,3})[-_. ]*e(?:p(?:isode)?)?[-_. ]*0*(\d{1,4})", low)
+    if m:
+        season, episode = int(m.group(1)), int(m.group(2))
+        return (
+            rf"(?<!\w)(?:s0*{season}[-_. ]*e0*{episode}|"
+            rf"season\s*0*{season}\s*[-_. ]*episode\s*0*{episode})(?!\w)"
+        )
+    m = re.fullmatch(r"s(?:eason)?[-_. ]*0*(\d{1,3})", low)
+    if m:
+        n = int(m.group(1))
+        return rf"(?<!\w)(?:s0*{n}|season\s*0*{n})(?!\w)"
+    m = re.fullmatch(r"e(?:p(?:isode)?)?[-_. ]*0*(\d{1,4})", low)
+    if m:
+        n = int(m.group(1))
+        return rf"(?<!\w)(?:e0*{n}|ep\s*0*{n}|episode\s*0*{n})(?!\w)"
+    m = re.fullmatch(r"(\d{3,4})p?", low)
+    if m:
+        n = m.group(1)
+        return rf"(?<!\w){re.escape(n)}p?(?!\w)"
+    source_aliases = {
+        "web-dl": r"WEB[- .]?DL", "webdl": r"WEB[- .]?DL", "web dl": r"WEB[- .]?DL",
+        "webrip": r"WEB[- .]?Rip", "bluray": r"Blu[- .]?Ray", "brrip": r"BR[- .]?Rip",
+        "bdrip": r"BD[- .]?Rip", "hdrip": r"HD[- .]?Rip", "web-cam": r"WEB[- .]?CAM",
+        "predvd": r"Pre[- .]?DVD", "pre-dvd": r"Pre[- .]?DVD",
+    }
+    if low in source_aliases:
+        return rf"(?<!\w)(?:{source_aliases[low]})(?!\w)"
+    lang_aliases = {
+        "hindi": "(?:hindi|hin)", "english": "(?:english|eng)", "tamil": "(?:tamil|tam)",
+        "telugu": "(?:telugu|tel)", "malayalam": "(?:malayalam|mal)", "kannada": "(?:kannada|kan)",
+        "bengali": "(?:bengali|ben)", "bangla": "(?:bangla|ben)", "marathi": "(?:marathi|mar)",
+        "punjabi": "(?:punjabi|pun)", "gujarati": "(?:gujarati|guj)", "bhojpuri": "(?:bhojpuri|bho)",
+        "korean": "(?:korean|kor)", "spanish": "(?:spanish|spa)", "french": "(?:french|fra)",
+        "german": "(?:german|ger)", "chinese": "(?:chinese|chi)", "japanese": "(?:japanese|jpn)",
+        "urdu": "(?:urdu|urd)",
+    }
+    if low in lang_aliases:
+        return rf"(?<!\w){lang_aliases[low]}(?!\w)"
+    return re.escape(value)
+
+
 def build_search_filter(query):
-    """Build a case-insensitive token search against file_name/caption."""
+    """Build an Auto Filter-style case-insensitive token search over filename/caption."""
     import re
 
     terms = [t for t in re.split(r"\s+", str(query or "").strip()) if t]
@@ -155,7 +207,7 @@ def build_search_filter(query):
 
     clauses = []
     for term in terms:
-        pattern = re.escape(term)
+        pattern = _search_term_pattern(term)
         clauses.append(
             {
                 "$or": [
@@ -166,7 +218,7 @@ def build_search_filter(query):
         )
     return {"$and": clauses}
 
-async def search_media(query, limit=100):
+async def search_media(query, limit=500):
     """Search the existing collections without changing their data.
 
     Partial database failure is tolerated, but an all-database failure is
