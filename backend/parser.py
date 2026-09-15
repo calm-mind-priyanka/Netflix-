@@ -101,6 +101,16 @@ def _extract_codec(source):
     return "Unknown"
 
 
+def _is_generic_filename(name):
+    value = re.sub(r"\s+", " ", str(name or "").strip().casefold())
+    value = EXT_RE.sub("", value)
+    return (
+        not value
+        or bool(re.fullmatch(r"(?:file|video|movie|document|media)[ _.-]*\d*", value))
+        or bool(re.fullmatch(r"(?:vid|file|document)[_-]?[a-z0-9]{4,}", value))
+    )
+
+
 def parse_doc(doc):
     name = str(doc.get("file_name") or "").strip()
     caption = str(doc.get("caption") or "")
@@ -132,6 +142,8 @@ def parse_doc(doc):
     subtitle_languages = list(languages) if subtitle_marked else []
     language = " + ".join(languages) if languages else "Unknown"
 
+    title_source = caption if _is_generic_filename(name) and caption.strip() else name or caption
+
     file_id = doc.get("_id")
     if file_id is None:
         file_id = doc.get("file_id", "")
@@ -144,7 +156,7 @@ def parse_doc(doc):
         "file_size": int(doc.get("file_size") or 0),
         "file_type": doc.get("file_type"),
         "mime_type": doc.get("mime_type"),
-        "title": clean_title(name or caption),
+        "title": clean_title(title_source),
         "type": "series" if season is not None or episode is not None else "movie",
         "season": season,
         "episode": episode,
@@ -242,12 +254,14 @@ def normalize_query(query):
     if source_match:
         source = source_match.group(1)
 
+    languages = []
     language = None
     low = value.casefold()
     for key, label in sorted(LANGUAGE_CODES.items(), key=lambda item: len(item[0]), reverse=True):
-        if re.search(rf"(?<!\w){re.escape(key)}(?!\w)", low):
-            language = label
-            break
+        if re.search(rf"(?<!\w){re.escape(key)}(?!\w)", low) and label not in languages:
+            languages.append(label)
+    if languages:
+        language = languages[0]
 
     title_text = value
     if se:
@@ -269,6 +283,7 @@ def normalize_query(query):
         "episode": episode,
         "year": year,
         "language": language,
+        "languages": languages,
         "quality": quality,
         "source": source,
     }
@@ -377,7 +392,7 @@ class _CatalogBuilder:
             key: parsed[key]
             for key in (
                 "file_id", "file_ref", "file_name", "file_size", "file_type", "mime_type",
-                "quality", "source", "language", "languages", "audio_languages", "subtitle_languages", "audio", "codec", "caption", "season", "episode", "year",
+                "quality", "source", "language", "languages", "audio_languages", "subtitle_languages", "audio", "codec", "caption", "poster", "season", "episode", "year",
             )
         }
 
