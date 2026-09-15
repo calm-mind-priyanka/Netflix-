@@ -225,46 +225,65 @@ async def home(request):
     return web.json_response({"ok": True, "items": enriched, "count": len(items)})
 
 
+def _norm_setting(value):
+    return re.sub(r"[- .]+", "", str(value or "")).casefold()
+
+
+def _variant_matches_request(variant, parsed):
+    if parsed.get("year") is not None and variant.get("year") != parsed["year"]:
+        return False
+    if parsed.get("season") is not None and variant.get("season") != parsed["season"]:
+        return False
+    if parsed.get("episode") is not None and variant.get("episode") != parsed["episode"]:
+        return False
+    wanted_quality = parsed.get("quality")
+    if wanted_quality:
+        got = re.sub(r"\s+", "", str(variant.get("quality") or "")).casefold().rstrip("p")
+        want = re.sub(r"\s+", "", wanted_quality).casefold().rstrip("p")
+        if got != want:
+            return False
+    wanted_source = parsed.get("source")
+    if wanted_source and _norm_setting(variant.get("source")) != _norm_setting(wanted_source):
+        return False
+    wanted_language = parsed.get("language")
+    if wanted_language:
+        languages = {str(x).casefold() for x in (variant.get("audio_languages") or variant.get("languages") or [])}
+        if wanted_language.casefold() not in languages:
+            return False
+    return True
+
+
+def _title_has_matching_variant(item, parsed):
+    if item.get("type") == "series":
+        return any(
+            _variant_matches_request(variant, parsed)
+            for season in (item.get("seasons") or [])
+            for episode in (season.get("episodes") or [])
+            for variant in (episode.get("variants") or [])
+        )
+    return any(_variant_matches_request(v, parsed) for v in (item.get("variants") or []))
+
+
 async def search(request):
+    """Search title first, then match requested metadata independently."""
     query = request.query.get("q", "").strip()
     if not query:
         return web.json_response({"ok": True, "items": [], "count": 0})
-
     parsed = normalize_query(query)
-    # Search MongoDB directly and normalize only the bounded matching result set.
-    # This avoids rebuilding the entire catalog for every keystroke/search.
-    docs = await search_media(query, limit=500)
+    # MongoDB receives only the title. Year/language/quality/season/episode/source
+    # are matched against parsed records, never against exact caption wording.
+    docs = await search_media(parsed["title"] or query, limit=TITLE_VARIANT_LIMIT)
     items = normalize(docs)
     candidates = []
-
     for item in items:
-        if parsed["year"] is not None:
-            years = set(item.get("years") or [])
-            if item.get("year"):
-                years.add(item["year"])
-            if parsed["year"] not in years:
-                continue
-        if parsed["season"] is not None:
-            if item["type"] != "series" or not any(
-                season["season"] == parsed["season"] for season in item.get("seasons", [])
-            ):
-                continue
-        if parsed["episode"] is not None:
-            if item["type"] != "series" or not any(
-                ep["episode"] == parsed["episode"]
-                for season in item.get("seasons", [])
-                if parsed["season"] is None or season["season"] == parsed["season"]
-                for ep in season.get("episodes", [])
-            ):
-                continue
-
-        score = _search_score(item, parsed["title"])
-        if score >= 0.72:
-            candidates.append((score, item))
-
-    candidates.sort(key=lambda pair: (-pair[0], pair[1]["title"].casefold()))
+        if search_title_score(item["title"], parsed["title"] or query) < 0.72:
+            continue
+        if not _title_has_matching_variant(item, parsed):
+            continue
+        candidates.append(item)
+    candidates.sort(key=lambda item: (item["title"].casefold(), item.get("year") or 0))
     selected = []
-    for _, item in candidates[:100]:
+    for item in candidates[:100]:
         copy = dict(item)
         if parsed["season"] is not None:
             copy["search_season"] = parsed["season"]
@@ -303,135 +322,46 @@ def _same_text(value, wanted):
 
 
 async def resolve(request):
-    """Resolve the exact real Telegram file matching independent player settings."""
+    """Resolve one real Telegram file using independent metadata matching."""
     title_name = request.query.get("title", "").strip()
     if not title_name:
         raise web.HTTPBadRequest(text="A title is required")
-
     wanted_type = request.query.get("type", "").strip().lower()
-    wanted_season = request.query.get("season")
-    wanted_episode = request.query.get("episode")
-    wanted_quality = request.query.get("quality", "").strip()
-    wanted_source = request.query.get("source", "").strip()
-    wanted_audio = request.query.get("audio", "").strip()
-    wanted_subtitle = request.query.get("subtitle", "").strip()
-
     try:
-        season = int(wanted_season) if wanted_season not in (None, "") else None
-        episode = int(wanted_episode) if wanted_episode not in (None, "") else None
+        season = int(request.query.get("season")) if request.query.get("season") not in (None, "") else None
+        episode = int(request.query.get("episode")) if request.query.get("episode") not in (None, "") else None
+        year = int(request.query.get("year")) if request.query.get("year") not in (None, "") else None
     except ValueError as exc:
-        raise web.HTTPBadRequest(text="Invalid season or episode") from exc
-
-    # Use the same Auto Filter-style MongoDB search engine as Home Search.
-    # Only explicit settings are added; the currently playing file is never
-    # allowed to inject hidden season/episode/language/quality constraints.
-    search_terms = [title_name]
-    for value in (wanted_audio, wanted_subtitle, wanted_quality, wanted_source):
-        if value and value.lower() not in {"auto", "unknown"}:
-            search_terms.append(value)
-    if season is not None:
-        search_terms.append(f"S{season:02d}")
-    if episode is not None:
-        search_terms.append(f"E{episode:02d}")
-    docs = await search_media(" ".join(search_terms), limit=TITLE_VARIANT_LIMIT)
+        raise web.HTTPBadRequest(text="Invalid year, season or episode") from exc
+    wanted = {
+        "year": year,
+        "season": season,
+        "episode": episode,
+        "quality": request.query.get("quality", "").strip() or None,
+        "source": request.query.get("source", "").strip() or None,
+        "language": request.query.get("audio", "").strip() or None,
+    }
+    docs = await search_media(title_name, limit=TITLE_VARIANT_LIMIT)
     parsed = [parse_doc(doc) for doc in docs if doc.get("_id") is not None or doc.get("file_id")]
     candidates = []
-    wanted_norm = normalize_for_search(title_name)
-
     for item in parsed:
         if wanted_type and item["type"] != wanted_type:
             continue
-        # Auto Filter style matching is title-tolerant after MongoDB has already
-        # matched every query token. This prevents punctuation/formatting
-        # differences between a filename and its caption from causing a false
-        # "not available" result, while the season/episode/settings checks below
-        # remain exact.
         if search_title_score(item["title"], title_name) < 0.72:
             continue
-        if season is not None and item.get("season") != season:
+        if not _variant_matches_request(item, wanted):
             continue
-        if episode is not None and item.get("episode") != episode:
-            continue
-        if wanted_quality and wanted_quality.lower() != "auto" and str(item.get("quality", "")).casefold() != wanted_quality.casefold():
-            continue
-        if wanted_source and wanted_source.lower() != "unknown":
-            got_source = re.sub(r"[- .]+", "", str(item.get("source", ""))).casefold()
-            want_source = re.sub(r"[- .]+", "", wanted_source).casefold()
-            if got_source != want_source:
-                continue
-        if wanted_audio and wanted_audio.casefold() not in {str(x).casefold() for x in (item.get("audio_languages") or [])}:
-            continue
-        if wanted_subtitle and wanted_subtitle.casefold() not in {str(x).casefold() for x in (item.get("subtitle_languages") or [])}:
+        subtitle = request.query.get("subtitle", "").strip()
+        if subtitle and subtitle.casefold() not in {str(x).casefold() for x in (item.get("subtitle_languages") or [])}:
             continue
         candidates.append(item)
-
     if not candidates:
         raise web.HTTPNotFound(text="The exact requested file is not available.")
-
-    # Deterministic choice only among exact matches; never downgrade a setting.
     def _quality_number(item):
-        value = str(item.get("quality") or "")
-        match = __import__("re").search(r"\d+", value)
+        match = re.search(r"\d+", str(item.get("quality") or ""))
         return int(match.group(0)) if match else 0
-
-    candidates.sort(
-        key=lambda item: (-_quality_number(item), str(item.get("file_name") or "").casefold())
-    )
+    candidates.sort(key=lambda item: (-_quality_number(item), str(item.get("file_name") or "").casefold()))
     return web.json_response({"ok": True, "file": candidates[0]})
-
-
-async def token(request):
-    file_id = request.match_info["file_id"]
-    doc = await find_media(file_id, projection={"_id": 1})
-    if doc is None:
-        raise web.HTTPNotFound(text="Media not found in Auto Filter Bot database")
-    return web.json_response(
-        {"ok": True, "token": make_stream_token(file_id)}
-    )
-
-
-async def stream(request):
-    file_id = request.match_info["file_id"]
-    token_value = request.query.get("token", "")
-    if not validate_stream_token(token_value, file_id):
-        raise web.HTTPForbidden(text="Invalid or expired stream token")
-    streamer = request.app.get("streamer")
-    if streamer is None:
-        raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
-    return await streamer.stream(request, file_id)
-
-
-async def tracks(request):
-    file_id = request.match_info["file_id"]
-    token_value = request.query.get("token", "")
-    if not validate_stream_token(token_value, file_id):
-        raise web.HTTPForbidden(text="Invalid or expired stream token")
-    streamer = request.app.get("streamer")
-    if streamer is None:
-        raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
-    return web.json_response({"ok": True, **await streamer.probe_tracks(file_id)})
-
-
-async def subtitle(request):
-    file_id = request.match_info["file_id"]
-    token_value = request.query.get("token", "")
-    if not validate_stream_token(token_value, file_id):
-        raise web.HTTPForbidden(text="Invalid or expired stream token")
-    streamer = request.app.get("streamer")
-    if streamer is None:
-        raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
-    return await streamer.subtitle(request, file_id)
-
-
-async def stream_compatible(request):
-    file_id = request.match_info["file_id"]
-    token_value = request.query.get("token", "")
-    if not validate_stream_token(token_value, file_id):
-        raise web.HTTPForbidden(text="Invalid or expired stream token")
-    streamer = request.app.get("streamer")
-    if streamer is None:
-        raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
-    return await streamer.transcode(request, file_id)
 
 
 async def download(request):
