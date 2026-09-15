@@ -69,7 +69,7 @@ SEARCH_CACHE_TTL = 30
 SEARCH_CACHE_MAX = 256
 SEARCH_INFLIGHT = {}
 SEARCH_SEMAPHORE = asyncio.Semaphore(3)
-SEARCH_CANDIDATE_LIMIT = min(max(120, int(os.getenv("SEARCH_CANDIDATE_LIMIT", "300"))), 500)
+SEARCH_CANDIDATE_LIMIT = min(max(80, int(os.getenv("SEARCH_CANDIDATE_LIMIT", "120"))), 300)
 HOME_CACHE = None
 HOME_CACHE_TIME = 0.0
 
@@ -79,7 +79,7 @@ HOME_CACHE_TIME = 0.0
 HOME_DOC_LIMIT = 300
 HOME_TITLE_LIMIT = 100
 HOME_ENRICH_LIMIT = 8
-SEARCH_ENRICH_LIMIT = 4
+SEARCH_ENRICH_LIMIT = 2
 # Never let an environment value such as 10000 turn one HTTP request into a
 # huge in-memory MongoDB result set. The exact title can still have many real
 # variants; 300 is the default/safety ceiling for a single web request on Koyeb Free.
@@ -319,7 +319,7 @@ async def _search_uncached(query):
             candidates.append(item)
         candidates.sort(key=lambda item: (item["title"].casefold(), item.get("year") or 0))
         selected = []
-        for item in candidates[:100]:
+        for item in candidates[:50]:
             copy = dict(item)
             if parsed["season"] is not None:
                 copy["search_season"] = parsed["season"]
