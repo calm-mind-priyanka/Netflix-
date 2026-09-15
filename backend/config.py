@@ -46,9 +46,9 @@ except ValueError:
 # Auto Filter-style search must be able to collect all variants/episodes for a
 # matching title instead of stopping at the first 500 records.
 try:
-    SEARCH_MAX_DOCS = max(500, int(_env("SEARCH_MAX_DOCS", "10000")))
+    SEARCH_MAX_DOCS = max(500, int(_env("SEARCH_MAX_DOCS", "1500")))
 except ValueError:
-    SEARCH_MAX_DOCS = 10000
+    SEARCH_MAX_DOCS = 1500
 
 HOST = _env("HOST", "0.0.0.0")
 try:
