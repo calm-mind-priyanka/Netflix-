@@ -308,8 +308,11 @@ class Streamer:
                 if sent >= max_probe:
                     break
                 chunk = chunk[:max_probe-sent]
-                process.stdin.write(chunk)
-                await process.stdin.drain()
+                try:
+                    process.stdin.write(chunk)
+                    await process.stdin.drain()
+                except (BrokenPipeError, ConnectionResetError):
+                    return {"audio_tracks": [], "subtitle_tracks": [], "available": False}
                 sent += len(chunk)
                 # Containers normally expose stream headers very early. Give
                 # ffprobe enough bytes for headers, but never consume a movie.
@@ -474,7 +477,7 @@ class Streamer:
 
             try:
                 await response.write_eof()
-            except (ConnectionResetError, BrokenPipeError):
+            except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
                 pass
             return response
         except (ConnectionResetError, BrokenPipeError):
@@ -613,7 +616,7 @@ class Streamer:
         await response.prepare(request)
         try:
             await write_body(response)
-        except (ConnectionResetError, BrokenPipeError):
+        except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
             return response
         except Exception:
             LOGGER.exception("Telegram streaming failed for file %s", file_id)
@@ -624,7 +627,7 @@ class Streamer:
         finally:
             try:
                 await response.write_eof()
-            except (ConnectionResetError, BrokenPipeError):
+            except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
                 pass
 
         return response
