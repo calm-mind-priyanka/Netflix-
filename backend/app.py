@@ -245,12 +245,12 @@ def _norm_setting(value):
     return re.sub(r"[- .]+", "", str(value or "")).casefold()
 
 
-def _variant_matches_request(variant, parsed):
+def _variant_matches_request(variant, parsed, include_episode=True):
     if parsed.get("year") is not None and variant.get("year") != parsed["year"]:
         return False
     if parsed.get("season") is not None and variant.get("season") != parsed["season"]:
         return False
-    if parsed.get("episode") is not None and variant.get("episode") != parsed["episode"]:
+    if include_episode and parsed.get("episode") is not None and variant.get("episode") != parsed["episode"]:
         return False
     wanted_quality = parsed.get("quality")
     if wanted_quality:
@@ -269,56 +269,115 @@ def _variant_matches_request(variant, parsed):
     return True
 
 
-def _title_has_matching_variant(item, parsed):
+def _title_has_matching_variant(item, parsed, include_episode=False):
     if item.get("type") == "series":
         return any(
-            _variant_matches_request(variant, parsed)
+            _variant_matches_request(variant, parsed, include_episode=include_episode)
             for season in (item.get("seasons") or [])
             for episode in (season.get("episodes") or [])
             for variant in (episode.get("variants") or [])
         )
-    return any(_variant_matches_request(v, parsed) for v in (item.get("variants") or []))
+    return any(_variant_matches_request(v, parsed, include_episode=include_episode) for v in (item.get("variants") or []))
+
+
+def _title_matches_search_identity(title, query_title):
+    """Reject fuzzy collisions that change an explicit numeric title identity."""
+    title_tokens = normalize_for_search(title).split()
+    query_tokens = normalize_for_search(query_title).split()
+    numeric_tokens = {token for token in query_tokens if token.isdigit()}
+    if numeric_tokens and not numeric_tokens.issubset(set(title_tokens)):
+        return False
+    return True
+
+
+def _attach_search_context(item, parsed):
+    copy = dict(item)
+    if parsed.get("season") is not None:
+        copy["search_season"] = parsed["season"]
+        copy["requested_season"] = parsed["season"]
+        copy["search_season_available"] = parsed["season"] in set(copy.get("available_seasons") or [])
+    if parsed.get("episode") is not None:
+        copy["search_episode"] = parsed["episode"]
+        available = any(
+            parsed["episode"] in (season.get("episode_numbers") or [])
+            for season in (copy.get("seasons") or [])
+            if parsed.get("season") is None or season.get("season") == parsed.get("season")
+        )
+        copy["search_episode_available"] = available
+    if parsed.get("quality"):
+        copy["search_quality"] = parsed["quality"]
+    if parsed.get("languages"):
+        copy["search_languages"] = parsed["languages"]
+    if parsed.get("source"):
+        copy["search_source"] = parsed["source"]
+    return copy
 
 
 async def _search_uncached(query):
-    """Perform one protected search; callers share the result for 30 seconds."""
+    """Build logical OTT results from a bounded set of real Mongo media records."""
     parsed = normalize_query(query)
     search_title = parsed["title"] or query
     async with SEARCH_SEMAPHORE:
+        # Search Mongo only with the canonical title portion. Season/episode are
+        # navigation context, not separate titles, and therefore must not narrow
+        # the Mongo candidate set to one physical episode.
         docs = await search_media(search_title, limit=TITLE_VARIANT_LIMIT)
         if not docs:
             fuzzy_docs = await fuzzy_search_media(search_title, limit=40)
             if fuzzy_docs:
                 fuzzy_parsed = parse_doc(fuzzy_docs[0])
-                docs = await search_media(fuzzy_parsed["title"], limit=TITLE_VARIANT_LIMIT)
+                if fuzzy_parsed.get("title") and fuzzy_parsed.get("title") != "Untitled":
+                    docs = await search_media(fuzzy_parsed["title"], limit=TITLE_VARIANT_LIMIT)
 
         items = normalize(docs)
+        title_candidates = [
+            item for item in items
+            if _title_matches_search_identity(item["title"], search_title)
+            and search_title_score(item["title"], search_title) >= 0.68
+        ]
+
+        # Normal search: return one logical movie/series per canonical identity.
+        # For a requested season/episode, a series is relevant when the season
+        # exists and at least one real asset satisfies optional quality/language/
+        # source filters. The episode itself is deliberately NOT a result filter.
         candidates = []
-        for item in items:
-            if search_title_score(item["title"], search_title) < 0.68:
-                continue
-            if not _title_has_matching_variant(item, parsed):
+        for item in title_candidates:
+            if item.get("type") == "series" and parsed.get("season") is not None:
+                if parsed["season"] not in set(item.get("available_seasons") or []):
+                    continue
+            if not _title_has_matching_variant(item, parsed, include_episode=False):
                 continue
             candidates.append(item)
-        candidates.sort(key=lambda item: (item["title"].casefold(), item.get("year") or 0))
-        selected = []
-        for item in candidates[:100]:
-            copy = dict(item)
-            if parsed["season"] is not None:
-                copy["search_season"] = parsed["season"]
-            if parsed["episode"] is not None:
-                copy["search_episode"] = parsed["episode"]
-            selected.append(copy)
 
-        # Search must not be held hostage by TMDB. Only a few cards without a
-        # real poster are enriched, and the rest return immediately.
-        if TMDB_API_KEY and selected:
-            targets = [i for i, item in enumerate(selected) if not item.get("poster")][:SEARCH_ENRICH_LIMIT]
-            if targets:
-                values = await asyncio.gather(*(enrich(selected[i]) for i in targets), return_exceptions=True)
-                for i, value in zip(targets, values):
-                    if not isinstance(value, Exception):
-                        selected[i] = value
+        # If a requested season does not exist, return the real canonical series
+        # result rather than inventing that season. This lets the UI show the
+        # actual available seasons and optionally explain that the requested one
+        # is unavailable.
+        if not candidates and parsed.get("season") is not None:
+            candidates = [
+                item for item in title_candidates
+                if item.get("type") == "series"
+                and _title_has_matching_variant(
+                    item,
+                    {**parsed, "season": None},
+                    include_episode=False,
+                )
+            ]
+
+        candidates.sort(
+            key=lambda item: (
+                0 if parsed.get("year") is not None and item.get("year") == parsed["year"] else 1,
+                0 if parsed.get("season") is not None and parsed["season"] in set(item.get("available_seasons") or []) else 1,
+                -search_title_score(item["title"], search_title),
+                item["title"].casefold(),
+                item.get("year") or 0,
+            )
+        )
+        selected = [_attach_search_context(item, parsed) for item in candidates[:100]]
+
+        # Search never waits for TMDB. Real posters from Mongo are returned
+        # immediately; uncached external metadata is reserved for detail/home
+        # enrichment so a slow TMDB service cannot make search feel slow.
         return selected
 
 
@@ -396,7 +455,7 @@ def _same_text(value, wanted):
 
 
 async def resolve(request):
-    """Resolve one real Telegram file using independent metadata matching."""
+    """Resolve exactly one real Telegram media asset from the grouped catalog."""
     title_name = request.query.get("title", "").strip()
     if not title_name:
         raise web.HTTPBadRequest(text="A title is required")
@@ -407,6 +466,7 @@ async def resolve(request):
         year = int(request.query.get("year")) if request.query.get("year") not in (None, "") else None
     except ValueError as exc:
         raise web.HTTPBadRequest(text="Invalid year, season or episode") from exc
+
     wanted = {
         "year": year,
         "season": season,
@@ -416,37 +476,53 @@ async def resolve(request):
         "language": request.query.get("audio", "").strip() or None,
     }
     cached_items = await _cached_or_search_items(title_name)
-    # The grouped search result already contains the real variants. Resolve
-    # from it when possible, avoiding another MongoDB query for the same title.
-    grouped_target = next((item for item in cached_items if item.get("title") and search_title_score(item["title"], title_name) >= 0.68), None)
-    if grouped_target:
-        parsed = []
-        if grouped_target.get("type") == "series":
-            for season_item in grouped_target.get("seasons") or []:
-                for episode_item in season_item.get("episodes") or []:
-                    parsed.extend(episode_item.get("variants") or [])
-        else:
-            parsed = list(grouped_target.get("variants") or [])
+    exact = [
+        item for item in cached_items
+        if normalize_for_search(item.get("title")) == normalize_for_search(title_name)
+        and (not wanted_type or item.get("type") == wanted_type)
+        and (year is None or item.get("year") == year)
+    ]
+    grouped_target = exact[0] if exact else next(
+        (item for item in cached_items if not wanted_type or item.get("type") == wanted_type),
+        None,
+    )
+    if not grouped_target:
+        raise web.HTTPNotFound(text="Title not found in the catalog.")
+
+    variants = []
+    if grouped_target.get("type") == "series":
+        for season_item in grouped_target.get("seasons") or []:
+            for episode_item in season_item.get("episodes") or []:
+                variants.extend(episode_item.get("variants") or [])
     else:
-        parsed = []
+        variants = list(grouped_target.get("variants") or [])
+
     candidates = []
-    for item in parsed:
-        if wanted_type and item["type"] != wanted_type:
+    subtitle = request.query.get("subtitle", "").strip()
+    for item in variants:
+        if item.get("type") and wanted_type and item.get("type") != wanted_type:
             continue
-        if search_title_score(item["title"], title_name) < 0.72:
+        if not _variant_matches_request(item, wanted, include_episode=True):
             continue
-        if not _variant_matches_request(item, wanted):
-            continue
-        subtitle = request.query.get("subtitle", "").strip()
         if subtitle and subtitle.casefold() not in {str(x).casefold() for x in (item.get("subtitle_languages") or [])}:
             continue
         candidates.append(item)
+
     if not candidates:
         raise web.HTTPNotFound(text="The exact requested file is not available.")
+
     def _quality_number(item):
         match = re.search(r"\d+", str(item.get("quality") or ""))
         return int(match.group(0)) if match else 0
-    candidates.sort(key=lambda item: (-_quality_number(item), str(item.get("file_name") or "").casefold()))
+
+    candidates.sort(
+        key=lambda item: (
+            -_quality_number(item),
+            str(item.get("source") or "").casefold(),
+            str(item.get("file_name") or "").casefold(),
+            str(item.get("file_id") or ""),
+        )
+    )
     return web.json_response({"ok": True, "file": candidates[0]})
 
 
@@ -705,6 +781,28 @@ async def maintenance_middleware(request, handler):
     return await handler(request)
 
 
+async def _start_telegram_in_background(app):
+    try:
+        telegram = await create_client()
+        app["tg"] = telegram
+        app["streamer"] = Streamer(telegram) if telegram else None
+        app["telegram_ready"] = telegram is not None
+        if telegram:
+            LOGGER.info("Telegram streaming client started")
+        else:
+            LOGGER.error(
+                "Telegram streaming client is unavailable. The catalog can still be served, "
+                "but playback/download is disabled."
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        app["tg"] = None
+        app["streamer"] = None
+        app["telegram_ready"] = False
+        LOGGER.exception("Background Telegram client startup failed")
+
+
 async def startup(app):
     missing = []
     if not DATABASE_URI:
@@ -713,27 +811,20 @@ async def startup(app):
         missing.append("DATABASE_URI2")
     if not SITE_SECRET:
         missing.append("SITE_SECRET")
-
     if missing:
         LOGGER.error("Missing required website settings: %s", ", ".join(missing))
 
-    telegram = await create_client()
-    app["tg"] = telegram
-    app["streamer"] = Streamer(telegram) if telegram else None
-    app["telegram_ready"] = telegram is not None
+    app["tg"] = None
+    app["streamer"] = None
+    app["telegram_ready"] = False
+    app["telegram_start_task"] = asyncio.create_task(_start_telegram_in_background(app))
 
     global TMDB_SESSION, TMDB_SEMAPHORE
     if TMDB_API_KEY:
-        TMDB_SESSION, TMDB_SEMAPHORE = ClientSession(timeout=ClientTimeout(total=8)), asyncio.Semaphore(2)
+        # Short timeout prevents external metadata from holding startup or search.
+        TMDB_SESSION = ClientSession(timeout=ClientTimeout(total=4))
+        TMDB_SEMAPHORE = asyncio.Semaphore(2)
         LOGGER.info("TMDB metadata enrichment enabled with bounded concurrency/cache")
-
-    if telegram:
-        LOGGER.info("Telegram streaming client started")
-    else:
-        LOGGER.error(
-            "Telegram streaming client is unavailable. "
-            "The catalog can still be served, but playback/download is disabled."
-        )
 
 
 async def cleanup(app):
@@ -742,6 +833,14 @@ async def cleanup(app):
         await TMDB_SESSION.close()
     TMDB_SESSION = None
     TMDB_SEMAPHORE = None
+
+    task = app.get("telegram_start_task")
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     telegram = app.get("tg")
     if telegram is not None:
