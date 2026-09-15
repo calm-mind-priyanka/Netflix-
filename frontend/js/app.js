@@ -172,6 +172,82 @@ function renderContinue(){
   bind();
 }
 
+async function renderAutoFilter(title, mount, initialSeason=null, initialEpisode=null){
+  const esc=escapeHtml;
+  const state={season:initialSeason,episode:initialEpisode,language:null,quality:null};
+  let options;
+  try{
+    options=await API.get("/api/filter-options?"+new URLSearchParams({title:title.title,id:title.id}));
+  }catch(e){
+    mount.innerHTML=`<div class="state error">Filter options unavailable.</div>`;
+    return;
+  }
+
+  const button=(kind,value,label=value)=>`<button type="button" class="afChoice" data-af-kind="${esc(kind)}" data-af-value="${esc(value)}">${esc(label)}</button>`;
+  const selectedLabel=()=>[
+    state.season!=null?`Season ${state.season}`:null,
+    state.episode!=null?`Episode ${state.episode}`:null,
+    state.language,
+    state.quality
+  ].filter(Boolean).join(" • ") || "Select an option";
+
+  function draw(message=""){
+    const seasons=options.seasons||[];
+    const episodes=state.season!=null?(options.episodes?.[String(state.season)]||[]):[];
+    mount.innerHTML=`<div class="variantChoices" style="padding:18px;margin-top:18px;border:1px solid rgba(255,255,255,.12);border-radius:16px;background:rgba(255,255,255,.035)">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+        <div><b>Auto Filter</b><small style="display:block;opacity:.65;margin-top:4px">${esc(selectedLabel())}</small></div>
+        <span id="afStatus" style="opacity:.7;font-size:.9rem">${esc(message)}</span>
+      </div>
+      ${title.type==="series"?`<div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Season</small><div style="display:flex;flex-wrap:wrap;gap:8px">${seasons.map(v=>button("season",String(v).replace(/\D/g,""),v)).join("")}</div></div>`:""}
+      ${title.type==="series"&&state.season!=null?`<div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Episode</small><div style="display:flex;flex-wrap:wrap;gap:8px">${episodes.map(v=>button("episode",String(v),`Episode ${v}`)).join("")||"<span style='opacity:.6'>No episodes found for this season.</span>"}</div></div>`:""}
+      <div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Language</small><div style="display:flex;flex-wrap:wrap;gap:8px">${(options.languages||[]).map(v=>button("language",v)).join("")}</div></div>
+      <div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Quality</small><div style="display:flex;flex-wrap:wrap;gap:8px">${(options.qualities||[]).map(v=>button("quality",v)).join("")}</div></div>
+      <div id="afResult" style="margin-top:16px"></div>
+    </div>`;
+    mount.querySelectorAll(".afChoice").forEach(btn=>btn.onclick=async()=>{
+      const kind=btn.dataset.afKind, value=btn.dataset.afValue;
+      if(kind==="season"){
+        state.season=Number(value); state.episode=null; state.language=null; state.quality=null;
+        draw("Choose an episode or another filter"); return;
+      }
+      if(kind==="episode"){state.episode=Number(value);}
+      if(kind==="language"){state.language=value;}
+      if(kind==="quality"){state.quality=value;}
+      await checkSelection();
+    });
+  }
+
+  async function checkSelection(){
+    const result=mount.querySelector("#afResult"), status=mount.querySelector("#afStatus");
+    if(status)status.textContent="Checking files…";
+    const params={title:title.title,id:title.id};
+    if(title.year!=null)params.year=String(title.year);
+    if(state.season!=null)params.season=String(state.season);
+    if(state.episode!=null)params.episode=String(state.episode);
+    if(state.language)params.language=state.language;
+    if(state.quality)params.quality=state.quality;
+    try{
+      const data=await API.get("/api/filter?"+new URLSearchParams(params));
+      const file=data.file;
+      if(status)status.textContent=`${data.count} matching file${data.count===1?"":"s"}`;
+      if(result)result.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 0">
+        <span>${esc(file?.file_name||"Matching files found")}</span>
+        ${file?.file_id?`<button type="button" class="primary" id="afPlay">▶ Play selected</button>`:""}
+      </div>`;
+      result.querySelector("#afPlay")?.addEventListener("click",()=>{
+        const next={title:title.title,year:title.year??null,season:file.season??state.season,episode:file.episode??state.episode,variants:[file]};
+        Player.open(title.id,title.type==="series"?`${title.title} • S${String(next.season||0).padStart(2,"0")} E${String(next.episode||0).padStart(2,"0")}`:title.title,[file],null,{title:title.title,type:title.type,year:title.year??null,season:next.season,episode:next.episode});
+      });
+    }catch(e){
+      if(status)status.textContent="No matching files";
+      if(result)result.innerHTML=`<div class="state empty" style="padding:12px 0">NO FILES WERE FOUND</div>`;
+    }
+  }
+
+  draw();
+}
+
 async function showDetails(id,preferredSeason=null,preferredEpisode=null){
   try{
     const localTitle=
@@ -220,6 +296,18 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
         </p>
       </div>
     </div>`;
+
+    if(title.type==="movie"){
+      html+=`<div id="autoFilterPanel"></div>`;
+      $("#detailBody").innerHTML=html;
+      await renderAutoFilter(title,$("#autoFilterPanel"));
+      return;
+    }
+
+    html+=`<div id="autoFilterPanel"></div>`;
+    $("#detailBody").innerHTML=html;
+    await renderAutoFilter(title,$("#autoFilterPanel"),preferredSeason,preferredEpisode);
+    return;
 
     if(title.type==="movie"){
       const variants=Array.isArray(title.variants)?title.variants:[];
