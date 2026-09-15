@@ -32,20 +32,10 @@ function poster(title){
 function card(title){
   const season=title.search_season??"";
   const episode=title.search_episode??"";
-  const seasonAvailable=title.search_season_available!==false;
-  const label=title.type==="series" && season && seasonAvailable
-    ? `${title.title} — Season ${season}`
-    : title.title;
-  const episodeAvailable=title.search_episode_available!==false;
-  const note=title.type==="series" && season
-    ? (seasonAvailable
-      ? (episode ? (episodeAvailable ? `Season ${season} • E${String(episode).padStart(2,"0")} matched` : `Season ${season} • Episode ${String(episode).padStart(2,"0")} unavailable`) : `Season ${season}`)
-      : `Season unavailable • ${title.available_seasons?.length||0} real seasons available`)
-    : `${title.type==="series"?"Series":"Movie"}${title.year?" • "+title.year:""}`;
   return `<article class="card" data-id="${escapeHtml(title.id)}" data-season="${escapeHtml(season)}" data-episode="${escapeHtml(episode)}">
     ${poster(title)}
-    <strong>${escapeHtml(label)}</strong>
-    <small>${escapeHtml(note)}</small>
+    <strong>${escapeHtml(title.title)}</strong>
+    <small>${title.type==="series"?"Series":"Movie"}${title.year?" • "+title.year:""}</small>
   </article>`;
 }
 
@@ -243,58 +233,68 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
       return;
     }
 
-    const allSeasons=Array.isArray(title.seasons)?title.seasons:[];
-    const selectedSeason=preferredSeason!=null
-      ?allSeasons.find(item=>item.season===preferredSeason)
-      :null;
-    const seasons=selectedSeason?[selectedSeason]:allSeasons;
+    const allSeasons=
+      Array.isArray(title.seasons)
+        ?title.seasons
+        :[];
+    const seasons=preferredSeason!=null
+      ?allSeasons.filter(item=>item.season===preferredSeason)
+      :allSeasons;
 
     if(!seasons.length){
-      html+=`<div class="state empty">No real seasons or episodes are available for this series.</div>`;
+
+      html+=
+        '<div class="state empty">No episodes found for this series.</div>';
+
     }else{
-      const seasonButtons=allSeasons.map(season=>`
-        <button class="settingOption ${preferredSeason===season.season?"active":""}" data-season-nav="${season.season}">
-          Season ${season.season}${preferredSeason===season.season?" ✓":""}
-        </button>`).join("");
-      html+=`<section class="seasonSelector">
-        <h2>Seasons</h2>
-        <div class="settingSubmenu">${seasonButtons}</div>
-      </section>`;
 
       html+=seasons.map(
-        (season,seasonIndex)=>{
-          const episodes=Array.isArray(season.episodes)?season.episodes:[];
-          return `<section>
-            <h2>Season ${season.season}</h2>
-            ${preferredEpisode!=null && season.season===preferredSeason
-              ?`<p class="searchMatch">${episodes.some(item=>item.episode===preferredEpisode)
-                ?`Search matched Episode ${preferredEpisode}; all real Season ${season.season} episodes remain visible.`
-                :`Episode ${preferredEpisode} is not available; showing all real Season ${season.season} episodes.`}</p>`
-              :""}
-            ${episodes.map((episode,episodeIndex)=>{
-              const nextEpisode=episodes[episodeIndex+1];
-              const nextSeason=seasons[seasonIndex+1]?.episodes?.[0];
+        (season,seasonIndex)=>`<section>
+          <h2>Season ${season.season}</h2>
+
+          ${(season.episodes||[]).filter(episode=>preferredEpisode==null||episode.episode===preferredEpisode).map(
+            (episode,episodeIndex)=>{
+
+              const nextEpisode=
+                season.episodes?.[episodeIndex+1];
+
+              const nextSeason=
+                seasons[seasonIndex+1]?.episodes?.[0];
+
               const next=nextEpisode
-                ?{title:title.title,year:title.year??null,season:season.season,episode:nextEpisode.episode,variants:nextEpisode.variants||[]}
+                ?{
+                    title:title.title,
+                    season:season.season,
+                    episode:nextEpisode.episode,
+                    variants:nextEpisode.variants||[]
+                  }
                 :nextSeason
-                  ?{title:title.title,year:title.year??null,season:seasons[seasonIndex+1].season,episode:nextSeason.episode,variants:nextSeason.variants||[]}
+                  ?{
+                      title:title.title,
+                      season:seasons[seasonIndex+1].season,
+                      episode:nextSeason.episode,
+                      variants:nextSeason.variants||[]
+                    }
                   :null;
-              const matched=preferredEpisode!=null && season.season===preferredSeason && episode.episode===preferredEpisode;
-              return `<div class="episode ${matched?"matchedEpisode":""}">
-                <span>Episode ${episode.episode}${matched?" • Match":""}</span>
-                <button class="primary episodePlay" data-season="${season.season}" data-episode="${episode.episode}">▶</button>
+
+              return `<div class="episode">
+                <span>Episode ${episode.episode}</span>
+
+                <button
+                  class="primary episodePlay"
+                  data-season="${season.season}"
+                  data-episode="${episode.episode}">
+                  ▶
+                </button>
               </div>`;
-            }).join("")||'<div class="state empty">No real episodes are available in this season.</div>'}
-          </section>`;
-        }
+            }
+          ).join("")}
+
+        </section>`
       ).join("");
     }
 
     $("#detailBody").innerHTML=html;
-
-    $("#detailBody").querySelectorAll("[data-season-nav]").forEach(button=>{
-      button.onclick=()=>showDetails(title.id,Number(button.dataset.season),null);
-    });
 
     $("#detailBody")
       .querySelectorAll(".episodePlay")
@@ -367,9 +367,13 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
   }
 }
 
+let searchRequestController=null;
+let searchSequence=0;
+
 async function doSearch(){
 
   const query=$("#query").value.trim();
+  const sequence=++searchSequence;
 
   if(!query){
     $("#results").innerHTML=
@@ -385,10 +389,20 @@ async function doSearch(){
 
   try{
 
+    if(searchRequestController){
+      searchRequestController.abort();
+    }
+    searchRequestController=new AbortController();
+
     const data=await API.get(
       "/api/search?q="+
-      encodeURIComponent(query)
+      encodeURIComponent(query),
+      {signal:searchRequestController.signal}
     );
+
+    if(sequence!==searchSequence){
+      return;
+    }
 
     if(!Array.isArray(data.items)){
       throw new Error(
@@ -416,6 +430,10 @@ async function doSearch(){
     bind();
 
   }catch(error){
+
+    if(error?.name==="AbortError" || sequence!==searchSequence){
+      return;
+    }
 
     state(
       $("#results"),
@@ -472,12 +490,13 @@ $("#query").oninput=()=>{
   window.searchTimer=
     setTimeout(
       doSearch,
-      250
+      650
     );
 };
 
 $("#query").onkeydown=event=>{
   if(event.key==="Enter"){
+    clearTimeout(window.searchTimer);
     doSearch();
   }
 };
