@@ -229,7 +229,7 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
       </section>`;
 
       $("#detailBody").innerHTML=html;
-      $("#playMovie").onclick=()=>Player.open(title.id,title.title,variants,null,{title:title.title,type:title.type});
+      $("#playMovie").onclick=()=>Player.open(title.id,title.title,variants,null,{title:title.title,type:title.type,year:title.year??null});
       return;
     }
 
@@ -335,6 +335,7 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
         const next=nextEpisode
           ?{
               title:title.title,
+              year:title.year??null,
               season:seasonNumber,
               episode:nextEpisode.episode,
               variants:nextEpisode.variants||[]
@@ -342,6 +343,7 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
           :nextSeason
             ?{
                 title:title.title,
+                year:title.year??null,
                 season:seasons[seasonIndex+1].season,
                 episode:nextSeason.episode,
                 variants:nextSeason.variants||[]
@@ -353,7 +355,7 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
           `${title.title} • S${String(seasonNumber).padStart(2,"0")} E${String(episodeNumber).padStart(2,"0")}`,
           episode?.variants||[],
           next,
-          {title:title.title,type:"series",season:seasonNumber,episode:episodeNumber}
+          {title:title.title,type:"series",year:title.year??null,season:seasonNumber,episode:episodeNumber}
         );
       });
 
