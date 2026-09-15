@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -232,7 +233,7 @@ async def search(request):
     parsed = normalize_query(query)
     # Search MongoDB directly and normalize only the bounded matching result set.
     # This avoids rebuilding the entire catalog for every keystroke/search.
-    docs = await search_media(query, limit=100)
+    docs = await search_media(query, limit=500)
     items = normalize(docs)
     candidates = []
 
@@ -321,10 +322,9 @@ async def resolve(request):
     except ValueError as exc:
         raise web.HTTPBadRequest(text="Invalid season or episode") from exc
 
-    # Search the same existing Auto Filter Bot MongoDB records used by the
-    # website search bar, but make the clicked settings part of the DB query.
-    # This avoids relying on the first N records for a title when a title has
-    # many releases and makes a setting click behave like a real search.
+    # Use the same Auto Filter-style MongoDB search engine as Home Search.
+    # Only explicit settings are added; the currently playing file is never
+    # allowed to inject hidden season/episode/language/quality constraints.
     search_terms = [title_name]
     for value in (wanted_audio, wanted_subtitle, wanted_quality, wanted_source):
         if value and value.lower() not in {"auto", "unknown"}:
@@ -341,7 +341,12 @@ async def resolve(request):
     for item in parsed:
         if wanted_type and item["type"] != wanted_type:
             continue
-        if normalize_for_search(item["title"]) != wanted_norm:
+        # Auto Filter style matching is title-tolerant after MongoDB has already
+        # matched every query token. This prevents punctuation/formatting
+        # differences between a filename and its caption from causing a false
+        # "not available" result, while the season/episode/settings checks below
+        # remain exact.
+        if search_title_score(item["title"], title_name) < 0.72:
             continue
         if season is not None and item.get("season") != season:
             continue
@@ -349,8 +354,11 @@ async def resolve(request):
             continue
         if wanted_quality and wanted_quality.lower() != "auto" and str(item.get("quality", "")).casefold() != wanted_quality.casefold():
             continue
-        if wanted_source and wanted_source.lower() != "unknown" and str(item.get("source", "")).casefold() != wanted_source.casefold():
-            continue
+        if wanted_source and wanted_source.lower() != "unknown":
+            got_source = re.sub(r"[- .]+", "", str(item.get("source", ""))).casefold()
+            want_source = re.sub(r"[- .]+", "", wanted_source).casefold()
+            if got_source != want_source:
+                continue
         if wanted_audio and wanted_audio.casefold() not in {str(x).casefold() for x in (item.get("audio_languages") or [])}:
             continue
         if wanted_subtitle and wanted_subtitle.casefold() not in {str(x).casefold() for x in (item.get("subtitle_languages") or [])}:
@@ -361,7 +369,14 @@ async def resolve(request):
         raise web.HTTPNotFound(text="The exact requested file is not available.")
 
     # Deterministic choice only among exact matches; never downgrade a setting.
-    candidates.sort(key=lambda item: (-(int(str(item.get("quality") or "0").rstrip("p")) if str(item.get("quality") or "").rstrip("p").isdigit() else 0), str(item.get("file_name") or "").casefold()))
+    def _quality_number(item):
+        value = str(item.get("quality") or "")
+        match = __import__("re").search(r"\d+", value)
+        return int(match.group(0)) if match else 0
+
+    candidates.sort(
+        key=lambda item: (-_quality_number(item), str(item.get("file_name") or "").casefold())
+    )
     return web.json_response({"ok": True, "file": candidates[0]})
 
 
