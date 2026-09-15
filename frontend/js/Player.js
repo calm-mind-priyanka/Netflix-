@@ -28,6 +28,10 @@ const Player={
     const player=document.getElementById("player"), menu=document.getElementById("menu");
     player.classList.remove("hidden"); menu.classList.add("hidden");
     document.getElementById("nowPlaying").textContent=label||"Now Playing";
+    const captionBox=document.getElementById("fileCaption");
+    if(captionBox){captionBox.classList.add("hidden");captionBox.textContent="";}
+    const captionToggle=document.getElementById("captionToggle");
+    if(captionToggle){captionToggle.onclick=()=>captionBox?.classList.toggle("hidden");}
     this.render();
 
     const first=this.bestInitialVariant();
@@ -300,6 +304,11 @@ const Player={
     video.pause(); video.removeAttribute("src"); video.load();
     const previous=this.variant;
     this.variant=v;
+    const captionBox=document.getElementById("fileCaption");
+    if(captionBox){
+      captionBox.textContent=String(v.caption||"").trim() || "No caption was stored for this file.";
+      captionBox.classList.add("hidden");
+    }
     this.quality=v.quality||this.quality||null;
     this.source=v.source||this.source||null;
     if(!this.audio)this.audio=this.variantAudio(v)[0]||null;
