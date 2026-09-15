@@ -5,7 +5,7 @@ from collections import defaultdict
 from difflib import SequenceMatcher
 
 QUALITY_RE = re.compile(
-    r"(?<!\w)(2160p|1440p|1080p|720p|576p|480p|360p|4320p|8k|4k|2k)(?!\w)",
+    r"(?<!\w)(2160p?|1440p?|1080p?|720p?|576p?|480p?|360p?|4320p?|8k|4k|2k)(?!\w)",
     re.I,
 )
 SE_RE = re.compile(
@@ -148,7 +148,10 @@ def parse_doc(doc):
         "type": "series" if season is not None or episode is not None else "movie",
         "season": season,
         "episode": episode,
-        "quality": qm.group(1).upper() if qm else "Auto",
+        "quality": (
+            (lambda q: q if q.lower().endswith("p") or q.lower() in {"8k", "4k", "2k"} else q + "P")(qm.group(1).upper())
+            if qm else "Auto"
+        ),
         "source": source_name,
         "language": language,  # legacy field kept for old clients
         "languages": languages or ["Unknown"],  # legacy field
@@ -208,6 +211,13 @@ def clean_title(value):
 
 
 def normalize_query(query):
+    """Split a human search into independent metadata constraints.
+
+    Search is intentionally decomposed before touching MongoDB: title, year,
+    season/episode, language, quality and source are matched independently
+    against parsed media records. The original filename/caption wording does
+    not need to equal the user's query.
+    """
     value = str(query or "").strip()
     se = SE_RE.search(value)
     season = int(se.group(1)) if se else None
@@ -217,22 +227,51 @@ def normalize_query(query):
         if sm:
             season = int(sm.group(1))
     if episode is None:
-        em = re.search(r"(?<!\w)episode\s*0*(\d{1,4})(?!\w)", value, re.I)
+        em = re.search(r"(?<!\w)(?:episode|ep)\s*0*(\d{1,4})(?!\w)", value, re.I)
         if em:
             episode = int(em.group(1))
 
     year_match = YEAR_RE.search(value)
     year = int(year_match.group(1)) if year_match else None
 
+    quality_match = QUALITY_RE.search(value)
+    quality = quality_match.group(1) if quality_match else None
+
+    source = None
+    source_match = SOURCE_RE.search(value)
+    if source_match:
+        source = source_match.group(1)
+
+    language = None
+    low = value.casefold()
+    for key, label in sorted(LANGUAGE_CODES.items(), key=lambda item: len(item[0]), reverse=True):
+        if re.search(rf"(?<!\w){re.escape(key)}(?!\w)", low):
+            language = label
+            break
+
     title_text = value
     if se:
         title_text = title_text.replace(se.group(0), " ")
     title_text = re.sub(r"(?<!\w)season\s*0*\d{1,3}(?!\w)", " ", title_text, flags=re.I)
-    title_text = re.sub(r"(?<!\w)episode\s*0*\d{1,4}(?!\w)", " ", title_text, flags=re.I)
+    title_text = re.sub(r"(?<!\w)(?:episode|ep)\s*0*\d{1,4}(?!\w)", " ", title_text, flags=re.I)
     if year_match:
         title_text = title_text.replace(year_match.group(0), " ")
+    if quality_match:
+        title_text = title_text.replace(quality_match.group(0), " ")
+    if source_match:
+        title_text = title_text.replace(source_match.group(0), " ")
+    for key in LANGUAGE_CODES:
+        title_text = re.sub(rf"(?<!\w){re.escape(key)}(?!\w)", " ", title_text, flags=re.I)
     title_text = re.sub(r"\s+", " ", title_text).strip()
-    return {"title": clean_title(title_text), "season": season, "episode": episode, "year": year}
+    return {
+        "title": clean_title(title_text),
+        "season": season,
+        "episode": episode,
+        "year": year,
+        "language": language,
+        "quality": quality,
+        "source": source,
+    }
 
 
 def search_title_score(title, query_title):
