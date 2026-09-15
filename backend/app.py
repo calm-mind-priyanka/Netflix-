@@ -306,6 +306,26 @@ def _autofilter_prepare_query(query):
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _build_selected_query(base_query, season=None, episode=None, language=None, quality=None):
+    """Build a cumulative Auto Filter query without duplicating metadata tokens."""
+    parsed = normalize_query(base_query)
+    title = parsed.get("title") or base_query
+    parts = [title]
+    if parsed.get("year") is not None:
+        parts.append(str(parsed["year"]))
+    s = season if season is not None else parsed.get("season")
+    e = episode if episode is not None else parsed.get("episode")
+    if s is not None:
+        parts.append(f"S{int(s):02d}" + (f"E{int(e):02d}" if e is not None else ""))
+    elif e is not None:
+        parts.append(f"E{int(e):02d}")
+    if language:
+        parts.append(str(language))
+    if quality:
+        parts.append(str(quality))
+    return " ".join(str(x) for x in parts if str(x).strip())
+
+
 def _parsed_files(docs):
     return [x for x in (parse_doc(doc) for doc in docs) if x.get("file_id") and not x.get("_parse_error")]
 
@@ -316,14 +336,14 @@ def _file_sort_key(item):
     return (quality, str(item.get("file_name") or "").casefold())
 
 
-async def _raw_autofilter_files(query, limit=None, allow_fuzzy=True):
+async def _raw_autofilter_files(query, limit=None):
     prepared = _autofilter_prepare_query(query)
     if not prepared:
         return []
     bounded = SEARCH_CANDIDATE_LIMIT if limit is None else min(max(1, int(limit)), 1500)
     async with SEARCH_SEMAPHORE:
         docs = await search_media(prepared, limit=bounded)
-        if not docs and allow_fuzzy:
+        if not docs:
             parsed_query = normalize_query(prepared)
             title = parsed_query.get("title") or prepared
             docs = await search_media(title, limit=bounded)
@@ -333,12 +353,15 @@ async def _raw_autofilter_files(query, limit=None, allow_fuzzy=True):
 
 
 async def _search_uncached(query):
-    """Return raw file-level matches, using the supplied Ultron search pipeline.
+    """Find the logical Netflix title while keeping Ultron raw files authoritative.
 
-    The website must not normalize/group the raw matches before displaying the
-    search result. Grouping is useful for the catalog/detail pages, but it is
-    exactly what caused many Ultron file matches to collapse into 3-4 website
-    cards. The raw Mongo matches are therefore authoritative here.
+    The search entry point uses the title portion of the query (for example,
+    ``Reacher`` from ``Reacher S04E07``) to locate real Mongo records. Season
+    and episode are parsed separately and are passed to the existing Netflix
+    detail/Auto Filter UI. This is important because the raw release token is
+    commonly stored as ``S04E07`` without a separator; searching the literal
+    tokens ``S04`` + ``E07`` as separate Mongo terms can therefore miss valid
+    files. No raw files are discarded from the database search used by filters.
     """
     prepared_query = _autofilter_prepare_query(query)
     if not prepared_query:
@@ -346,37 +369,64 @@ async def _search_uncached(query):
 
     parsed = normalize_query(prepared_query)
     search_title = parsed.get("title") or prepared_query
+    base_parts = [search_title]
+    if parsed.get("year") is not None:
+        base_parts.append(str(parsed["year"]))
+    base_query = " ".join(base_parts).strip()
 
     async with SEARCH_SEMAPHORE:
-        docs = await search_media(prepared_query, limit=SEARCH_MAX_DOCS)
-        # Match Ultron's normal no-result fallback: search the cleaned title,
-        # then use fuzzy correction only when spell-check style recovery is needed.
-        if not docs and search_title.casefold() != prepared_query.casefold():
-            docs = await search_media(search_title, limit=SEARCH_MAX_DOCS)
+        docs = await search_media(base_query, limit=SEARCH_CANDIDATE_LIMIT)
+        if not docs and search_title.casefold() != base_query.casefold():
+            docs = await search_media(search_title, limit=SEARCH_CANDIDATE_LIMIT)
         if not docs and parsed.get("year") is None:
             fuzzy_docs = await fuzzy_search_media(search_title, limit=min(40, SEARCH_CANDIDATE_LIMIT))
             if fuzzy_docs:
                 fuzzy_parsed = parse_doc(fuzzy_docs[0])
-                docs = await search_media(fuzzy_parsed.get("title") or search_title, limit=SEARCH_MAX_DOCS)
+                docs = await search_media(fuzzy_parsed.get("title") or search_title, limit=SEARCH_CANDIDATE_LIMIT)
 
     raw_items = await asyncio.to_thread(_parsed_files, docs)
     if not raw_items:
         return []
 
-    # Keep every raw file. Do not collapse by normalized title. This is the
-    # critical parity point with Ultron's get_search_results().
-    selected = []
-    for index, item in enumerate(raw_items):
-        copy = dict(item)
-        copy["id"] = f"file:{copy.get('file_id') or index}"
-        if parsed.get("season") is not None:
-            copy["search_season"] = parsed["season"]
-        if parsed.get("episode") is not None:
-            copy["search_episode"] = parsed["episode"]
-        selected.append(copy)
+    # When S/E was supplied, prefer a real raw file from that season/episode
+    # when choosing the title card. We do NOT throw away the other files; the
+    # detail page reloads the full title pool and /api/filter searches the raw
+    # Mongo collection again with cumulative constraints.
+    if parsed.get("season") is not None or parsed.get("episode") is not None:
+        matching = [
+            item for item in raw_items
+            if (parsed.get("season") is None or item.get("season") == parsed.get("season"))
+            and (parsed.get("episode") is None or item.get("episode") == parsed.get("episode"))
+        ]
+        if matching:
+            raw_items = matching + [item for item in raw_items if item not in matching]
 
-    # Poster enrichment is presentation-only and never changes which files
-    # matched. Cache it aggressively and keep concurrency bounded.
+    # Group only the SEARCH PRESENTATION by logical title. The underlying
+    # Mongo records remain individual raw files and are never collapsed for
+    # Auto Filter/playback.
+    grouped = {}
+    for item in raw_items:
+        title = str(item.get("title") or "Untitled").strip()
+        kind = str(item.get("type") or "movie")
+        year = item.get("year")
+        key = (normalize_for_search(title), kind, year)
+        if key not in grouped:
+            copy = dict(item)
+            copy["id"] = f"file:{copy.get('file_id') or len(grouped)}"
+            copy["raw_match_count"] = 0
+            grouped[key] = copy
+        grouped[key]["raw_match_count"] += 1
+
+    selected = list(grouped.values())
+    selected.sort(
+        key=lambda item: (
+            0 if (parsed.get("season") is None or item.get("season") == parsed.get("season"))
+            and (parsed.get("episode") is None or item.get("episode") == parsed.get("episode")) else 1,
+            -int(item.get("raw_match_count") or 0),
+            str(item.get("title") or "").casefold(),
+        )
+    )
+
     if TMDB_API_KEY and selected:
         values = await asyncio.gather(
             *(enrich(item) for item in selected[:SEARCH_ENRICH_LIMIT]),
@@ -467,6 +517,24 @@ async def title(request):
     title_id = request.match_info["id"]
     requested_name = request.query.get("q", "").strip()
 
+    # Search results are raw Auto Filter file records. When the search UI
+    # opens the first result automatically, resolve that raw id back to its
+    # logical Netflix title instead of treating the file id as a catalog id.
+    if str(title_id).startswith("file:"):
+        for _key, (stamp, cached_items) in list(SEARCH_CACHE.items()):
+            if time.time() - stamp >= SEARCH_CACHE_TTL:
+                continue
+            target = next((item for item in cached_items if item.get("id") == title_id), None)
+            if target and target.get("title"):
+                full = await _load_grouped_title(target.get("title"), None)
+                if full:
+                    return web.json_response({"ok": True, **await enrich(full)})
+        if requested_name:
+            full = await _load_grouped_title(requested_name, None)
+            if full:
+                return web.json_response({"ok": True, **await enrich(full)})
+        raise web.HTTPNotFound(text="Title not found")
+
     if requested_name:
         target = await _load_grouped_title(requested_name, title_id)
         if target:
@@ -501,105 +569,76 @@ def _best_file(variants):
 
 
 async def filter_options(request):
-    """Return filter choices for the ORIGINAL raw search result set.
+    """Return the same fixed Auto Filter controls used by the original UI.
 
-    The filter engine is intentionally query-based like Ultron: the website
-    never opens a poster/title and then searches only that grouped record.
+    Availability is checked by /api/filter against the raw Mongo result set;
+    this endpoint only supplies the controls and title type.
     """
-    query = request.query.get("q", "").strip()
-    if not query:
-        query = request.query.get("title", "").strip()
-    if not query:
-        raise web.HTTPBadRequest(text="A search query is required")
-
-    files = await _raw_autofilter_files(
-        query,
-        limit=SEARCH_MAX_DOCS,
-        allow_fuzzy=False,
-    )
-    if not files:
-        raise web.HTTPNotFound(text="No files found for this search")
-
-    seasons = sorted({
-        int(v["season"]) for v in files
-        if v.get("season") is not None
-    })
-    episodes_by_season = {}
-    for v in files:
-        if v.get("season") is not None and v.get("episode") is not None:
-            episodes_by_season.setdefault(int(v["season"]), set()).add(int(v["episode"]))
-
-    # Ultron presents the same predefined language/quality choices.  Season and
-    # episode availability, however, is derived from the actual raw files.
+    title_name=request.query.get("title","").strip()
+    if not title_name:
+        raise web.HTTPBadRequest(text="A title is required")
+    target=await _load_grouped_title(title_name, None)
+    if not target:
+        raise web.HTTPNotFound(text="Title not found")
     return web.json_response({
-        "ok": True,
-        "languages": FILTER_LANGUAGES,
-        "qualities": FILTER_QUALITIES,
-        "seasons": [f"Season {s}" for s in seasons] or FILTER_SEASONS,
-        "available_seasons": seasons,
-        "episodes": {str(k): sorted(v) for k, v in episodes_by_season.items()},
-        "type": "series" if any(v.get("season") is not None or v.get("episode") is not None for v in files) else "movie",
-        "raw_count": len(files),
+        "ok":True,
+        "languages":FILTER_LANGUAGES,
+        "qualities":FILTER_QUALITIES,
+        "seasons":[f"Season {i}" for i in range(1,16)],
+        "episodes":{str(i):list(range(1,11)) for i in range(1,16)},
+        "type":target.get("type"),
     })
 
 
 async def filter_media(request):
-    """Apply cumulative filters against the same raw Auto Filter search.
+    """Apply cumulative filters to the ORIGINAL raw Auto Filter result set.
 
-    MongoDB performs the actual narrowing through the same filename/caption
-    regex search used by the bot.  No grouped title card is used as the source
-    of truth and no frontend-only filtering is trusted.
+    The query is reduced to its title/year portion first. Season, episode,
+    language and quality are then independent Mongo constraints ANDed onto the
+    same raw file search. This avoids the S04 E07 token-spacing problem and,
+    importantly, never collapses multiple valid files into one.
     """
-    query = request.query.get("q", "").strip()
+    query=request.query.get("q","").strip() or request.query.get("title","").strip()
     if not query:
         raise web.HTTPBadRequest(text="A search query is required")
-
     try:
-        season = int(request.query["season"]) if request.query.get("season", "").isdigit() else None
-        episode = int(request.query["episode"]) if request.query.get("episode", "").isdigit() else None
+        season=int(request.query["season"]) if request.query.get("season","").isdigit() else None
+        episode=int(request.query["episode"]) if request.query.get("episode","").isdigit() else None
     except ValueError as exc:
         raise web.HTTPBadRequest(text="Invalid season or episode") from exc
+    language=request.query.get("language","").strip() or None
+    quality=request.query.get("quality","").strip() or None
 
-    language = request.query.get("language", "").strip() or None
-    quality = request.query.get("quality", "").strip() or None
+    prepared=_autofilter_prepare_query(query)
+    parsed=normalize_query(prepared)
+    base_title=parsed.get("title") or prepared
+    base_parts=[base_title]
+    if parsed.get("year") is not None:
+        base_parts.append(str(parsed["year"]))
+    base_query=" ".join(base_parts)
 
-    # A filter selection is an AND against the ORIGINAL query in MongoDB.
-    # This is the key Auto Filter parity point: the grouped title/detail
-    # catalogue is never used as the filter source.
-    prepared_base = _autofilter_prepare_query(query)
-    files = await search_media_with_filters(
-        prepared_base,
+    files=await search_media_with_filters(
+        base_query,
         season=season,
         episode=episode,
         language=language,
         quality=quality,
         limit=SEARCH_MAX_DOCS,
     )
-    files = await asyncio.to_thread(_parsed_files, files)
-    files.sort(key=_file_sort_key, reverse=True)
+    files=await asyncio.to_thread(_parsed_files, files)
+    files.sort(key=_file_sort_key,reverse=True)
 
-    # Only a unique raw match becomes playable.  Multiple remaining files are
-    # returned as candidates so the UI can ask for another filter rather than
-    # silently choosing an arbitrary release.
-    exact_file = files[0] if len(files) == 1 else None
-    selected_query = " ".join(
-        part for part in [
-            prepared_base,
-            f"S{season:02d}" if season is not None else "",
-            f"E{episode:02d}" if episode is not None else "",
-            language or "",
-            quality or "",
-        ] if str(part).strip()
-    )
+    # Keep every matching raw file. Player.open receives the whole matching
+    # pool so one file is not required before Play becomes available.
     return web.json_response({
-        "ok": bool(files),
-        "count": len(files),
-        "file": exact_file,
-        "matches": files[:50],
-        "query": selected_query,
-        "exact": len(files) == 1,
-        "error": None if files else "NO FILES WERE FOUND",
-    }, status=200 if files else 404)
+        "ok":bool(files),
+        "count":len(files),
+        "file":files[0] if files else None,
+        "matches":files[:100],
+        "query":base_query,
+        "exact":len(files)==1,
+        "error":None if files else "NO FILES WERE FOUND",
+    },status=200 if files else 404)
 
 async def resolve(request):
     """Resolve one real Telegram file using independent metadata matching."""
