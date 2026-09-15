@@ -2,7 +2,7 @@ const Player={
   variants:[], allVariants:[], current:null, titleId:null, titleName:null, titleType:null, titleYear:null,
   variant:null, audio:null, audioTrack:null, subtitle:null, subtitleTrack:null, quality:null, source:null,
   season:null, episode:null, menuSection:null,
-  tracks:{audio_tracks:[],subtitle_tracks:[]}, subtitleUrl:null, switchBusy:false,
+  tracks:{audio_tracks:[],subtitle_tracks:[]}, subtitleUrl:null, switchBusy:false, filterEpisodes:[],
   selectedSettings:{},
 
   async open(titleId,label,variants,next,context={}){
@@ -23,7 +23,7 @@ const Player={
     // The currently playing file supplies display values, but does not lock
     // future searches to those values.
     this.selectedSettings={};
-    this.tracks={audio_tracks:[],subtitle_tracks:[]}; this.menuSection=null;
+    this.tracks={audio_tracks:[],subtitle_tracks:[]}; this.filterEpisodes=[]; this.menuSection=null;
 
     const player=document.getElementById("player"), menu=document.getElementById("menu");
     player.classList.remove("hidden"); menu.classList.add("hidden");
@@ -78,57 +78,41 @@ const Player={
     if(v.episode!=null)this.episode=Number(v.episode);
   },
 
-  // All player choices are derived only from real assets already present in the
-  // current logical title/episode. Nothing is fabricated from a fixed list.
-  languageChoices(){
-    const values=new Set();
-    for(const v of this.allVariants||[]){
-      for(const lang of this.variantAudio(v)) values.add(lang);
-    }
-    return [...values].sort((a,b)=>String(a).localeCompare(String(b)));
-  },
-  qualityChoices(){
-    return [...new Set((this.allVariants||[]).map(v=>v?.quality).filter(v=>v&&String(v).toLowerCase()!=="auto"))]
-      .sort((a,b)=>this.rankVariant({quality:b})-this.rankVariant({quality:a}));
-  },
+  // Match Auto Filter: these choices are predefined and are intentionally
+  // shown even when the current title has no matching file. Availability is
+  // checked only after the user clicks a choice through /api/resolve.
+  languageChoices(){return ["Malayalam","Tamil","English","Hindi","Telugu","Kannada","Gujarati","Marathi","Punjabi"]},
+  qualityChoices(){return ["360P","480P","720P","1080P","1440P","2160P"]},
   sourceChoices(){
     return [...new Set((this.allVariants||[]).map(v=>v?.source).filter(v=>v&&String(v).toLowerCase()!=="unknown"))]
       .sort((a,b)=>String(a).localeCompare(String(b)));
   },
-  seasonChoices(){
-    return [...new Set((this.allVariants||[]).map(v=>Number(v?.season)).filter(Number.isFinite))].sort((a,b)=>a-b);
-  },
+  seasonChoices(){return this.titleType==="series"?[1,2,3,4,5,6,7,8,9,10]:[]},
   episodeChoices(){
+    if(this.filterEpisodes?.length)return [...this.filterEpisodes].sort((a,b)=>a-b);
     const season=Number(this.season);
-    return [...new Set((this.allVariants||[])
-      .filter(v=>Number(v?.season)===season)
-      .map(v=>Number(v?.episode))
-      .filter(Number.isFinite))].sort((a,b)=>a-b);
+    return [...new Set((this.allVariants||[]).filter(v=>Number(v?.season)===season).map(v=>Number(v?.episode)).filter(Number.isFinite))].sort((a,b)=>a-b);
   },
   allAudioLanguages(){return this.languageChoices()},
-  allSubtitles(){return [...new Set((this.allVariants||[]).flatMap(v=>this.variantSubs(v)).filter(x=>x&&x!=="Unknown"))]},
+  allSubtitles(){const values=[]; for(const v of (this.allVariants||[])){for(const x of this.variantSubs(v)){if(x&&x!=="Unknown")values.push(x);}} return [...new Set(values)];},
   allQualities(){return this.qualityChoices()},
   allSources(){return this.sourceChoices()},
   allSeasons(){return this.seasonChoices()},
-  episodesForSeason(season){
-    return [...new Set((this.allVariants||[])
-      .filter(v=>Number(v?.season)===Number(season))
-      .map(v=>Number(v?.episode))
-      .filter(Number.isFinite))].sort((a,b)=>a-b);
-  },
+  episodesForSeason(season){return this.episodeChoices()},
 
   render(){
     const audio=this.allAudioLanguages();
     const subs=this.allSubtitles();
     const embeddedAudio=(this.tracks.audio_tracks||[]).map(t=>t.language).filter(x=>x&&x!=="Unknown");
     const embeddedSubs=(this.tracks.subtitle_tracks||[]).map(t=>t.language).filter(x=>x&&x!=="Unknown");
-    const qualities=this.allQualities(), sources=this.allSources(), seasons=this.allSeasons();
+    const qualities=this.allQualities(), sources=this.allSources(), seasons=this.allSeasons(), episodes=this.titleType==="series"&&this.season!=null?this.episodeChoices():[];
     const section=(key,label,values,current,formatter=x=>x)=>!values.length?"":`<button class="settingRow" data-setting-section="${key}"><span><b>${label}</b><small>${playerEscape(current??"Not selected")}</small></span><span>›</span></button><div class="settingSubmenu ${this.menuSection===key?"":"hidden"}">${values.map(v=>`<button class="settingOption ${String(v)===String(current)?"active":""}" data-player-${key}="${playerEscape(v)}"><span>${playerEscape(formatter(v))}</span>${String(v)===String(current)?"✓":""}</button>`).join("")}</div>`;
 
     let html=`<div class="settingsHead"><h3>Player settings</h3><button id="closeSettings" aria-label="Close settings">×</button></div>`;
     html+=section("audio","Language / Audio",audio,this.audio);
     html+=section("quality","Quality",qualities,this.quality);
     html+=section("source","Source / Release",sources,this.source);
+    if(this.titleType==="series" && this.season!=null) html+=section("episode","Episode",episodes,this.episode);
     if(embeddedAudio.length) html+=section("audioTrack","Audio Track",embeddedAudio,this.audioTrack);
     if(embeddedSubs.length) html+=section("subtitleTrack","Subtitle Track",embeddedSubs,this.subtitleTrack);
     if(subs.length) html+=section("subtitle","Subtitle",subs,this.subtitle);
@@ -238,14 +222,19 @@ const Player={
         if(key==="season") {
           this.season=Number(value);
           this.selectedSettings.season=Number(value);
-          // A new season is a new catalog context. Do not carry a previous
-          // episode or media filters into it and accidentally hide its real assets.
           this.episode=null;
           delete this.selectedSettings.episode;
           delete this.selectedSettings.quality;
           delete this.selectedSettings.source;
           delete this.selectedSettings.audio;
           delete this.selectedSettings.subtitle;
+          try{
+            const data=await API.get("/api/filter-options?"+new URLSearchParams({title:this.titleName,id:this.titleId}));
+            this.filterEpisodes=(data?.episodes?.[String(this.season)]||[]).map(Number);
+          }catch(_){this.filterEpisodes=[]}
+          this.render();
+          document.getElementById("menu").classList.remove("hidden");
+          return;
         }
         if(key==="episode"){
           this.episode=Number(value);
