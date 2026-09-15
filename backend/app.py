@@ -68,7 +68,8 @@ SEARCH_CACHE = OrderedDict()
 SEARCH_CACHE_TTL = 30
 SEARCH_CACHE_MAX = 256
 SEARCH_INFLIGHT = {}
-SEARCH_SEMAPHORE = asyncio.Semaphore(2)
+SEARCH_SEMAPHORE = asyncio.Semaphore(3)
+SEARCH_CANDIDATE_LIMIT = min(max(500, int(os.getenv("SEARCH_CANDIDATE_LIMIT", "1500"))), 1500)
 HOME_CACHE = None
 HOME_CACHE_TIME = 0.0
 
@@ -286,20 +287,32 @@ async def _search_uncached(query):
     parsed = normalize_query(query)
     search_title = parsed["title"] or query
     async with SEARCH_SEMAPHORE:
-        docs = await search_media(search_title, limit=TITLE_VARIANT_LIMIT)
-        if not docs:
+        docs = await search_media(search_title, limit=SEARCH_CANDIDATE_LIMIT)
+        # An explicit year is part of the user's movie identity. Never replace
+        # an exact-year search with a fuzzy title fallback, because that can
+        # turn e.g. "Dhurandhar 2025" into a different Dhurandhar-like title.
+        if not docs and parsed.get("year") is None:
             fuzzy_docs = await fuzzy_search_media(search_title, limit=40)
             if fuzzy_docs:
                 fuzzy_parsed = parse_doc(fuzzy_docs[0])
-                docs = await search_media(fuzzy_parsed["title"], limit=TITLE_VARIANT_LIMIT)
+                docs = await search_media(fuzzy_parsed["title"], limit=SEARCH_CANDIDATE_LIMIT)
 
         # Catalog parsing/grouping is CPU-heavy for large result sets. Keep it
         # off aiohttp's event loop so a 1500-document search cannot starve the
         # Koyeb health endpoint or unrelated HTTP requests.
         items = await asyncio.to_thread(normalize, docs)
         candidates = []
+        strict_identity = bool(parsed.get("year") is not None)
+        normalized_query_title = normalize_for_search(search_title)
         for item in items:
-            if search_title_score(item["title"], search_title) < 0.68:
+            normalized_item_title = normalize_for_search(item.get("title"))
+            # With an explicit year, title identity must also be exact after
+            # punctuation/spacing normalization. This prevents similar titles
+            # from leaking into a year-specific result.
+            if strict_identity:
+                if normalized_item_title != normalized_query_title:
+                    continue
+            elif search_title_score(item["title"], search_title) < 0.68:
                 continue
             if not _title_has_matching_variant(item, parsed):
                 continue
@@ -314,9 +327,20 @@ async def _search_uncached(query):
                 copy["search_episode"] = parsed["episode"]
             selected.append(copy)
 
-        # Search is deliberately TMDB-free. Posters/descriptions may be
-        # enriched on home/detail pages, but an external metadata service must
-        # never add latency to the critical search path on Koyeb Free.
+        # Enrich only the visible search prefix. The previous build skipped
+        # TMDB entirely on search, which is why the API key could successfully
+        # provide descriptions on detail/home pages while search cards had no
+        # poster. Keep this bounded so Koyeb Free is not flooded with TMDB
+        # requests. Cached TMDB entries are effectively free.
+        if TMDB_API_KEY and selected:
+            enrich_limit = min(len(selected), 12)
+            values = await asyncio.gather(
+                *(enrich(selected[i]) for i in range(enrich_limit)),
+                return_exceptions=True,
+            )
+            for i, value in enumerate(values):
+                if not isinstance(value, Exception):
+                    selected[i] = value
         return selected
 
 
@@ -374,20 +398,47 @@ async def _cached_or_search_items(query):
     return result
 
 
+async def _load_grouped_title(title_name, title_id=None):
+    """Load the complete real variant pool for one logical title.
+
+    Search uses a small candidate window for speed; opening a title or resolving
+    a file uses the larger bounded window so all real seasons/episodes and
+    variants for that title are retained.
+    """
+    name = str(title_name or "").strip()
+    if not name:
+        return None
+    docs = await search_media(name, limit=TITLE_VARIANT_LIMIT)
+    items = await asyncio.to_thread(normalize, docs)
+    if title_id:
+        return next((item for item in items if item.get("id") == title_id), None)
+    wanted = normalize_for_search(name)
+    exact = [item for item in items if normalize_for_search(item.get("title")) == wanted]
+    if exact:
+        return exact[0]
+    return next((item for item in items if search_title_score(item.get("title"), name) >= 0.90), None)
+
+
 async def title(request):
     title_id = request.match_info["id"]
     requested_name = request.query.get("q", "").strip()
 
-    # When the browser supplies the title name, go directly to the targeted
-    # MongoDB search. Do not scan/re-parse the homepage first.
     if requested_name:
-        grouped = await _cached_or_search_items(requested_name)
-        target = next((item for item in grouped if item["id"] == title_id), None)
+        target = await _load_grouped_title(requested_name, title_id)
         if target:
             return web.json_response({"ok": True, **await enrich(target)})
 
-    raise web.HTTPNotFound(text="Title not found")
+    # Deep links without q can still be resolved from a recent search cache.
+    for _key, (stamp, cached_items) in list(SEARCH_CACHE.items()):
+        if time.time() - stamp >= SEARCH_CACHE_TTL:
+            continue
+        target = next((item for item in cached_items if item.get("id") == title_id), None)
+        if target:
+            full = await _load_grouped_title(target.get("title"), title_id)
+            if full:
+                return web.json_response({"ok": True, **await enrich(full)})
 
+    raise web.HTTPNotFound(text="Title not found")
 
 def _same_text(value, wanted):
     return normalize_for_search(value) == normalize_for_search(wanted)
@@ -413,20 +464,15 @@ async def resolve(request):
         "source": request.query.get("source", "").strip() or None,
         "language": request.query.get("audio", "").strip() or None,
     }
-    cached_items = await _cached_or_search_items(title_name)
-    # The grouped search result already contains the real variants. Resolve
-    # from it when possible, avoiding another MongoDB query for the same title.
-    grouped_target = next((item for item in cached_items if item.get("title") and search_title_score(item["title"], title_name) >= 0.68), None)
+    grouped_target = await _load_grouped_title(title_name)
+    parsed = []
     if grouped_target:
-        parsed = []
         if grouped_target.get("type") == "series":
             for season_item in grouped_target.get("seasons") or []:
                 for episode_item in season_item.get("episodes") or []:
                     parsed.extend(episode_item.get("variants") or [])
         else:
             parsed = list(grouped_target.get("variants") or [])
-    else:
-        parsed = []
     candidates = []
     subtitle = request.query.get("subtitle", "").strip()
     target_type = str(grouped_target.get("type") or "").casefold() if grouped_target else ""
