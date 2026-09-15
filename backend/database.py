@@ -218,11 +218,13 @@ def build_search_filter(query):
         )
     return {"$and": clauses}
 
-async def search_media(query, limit=500):
-    """Search the existing collections without changing their data.
+async def search_media(query, limit=None):
+    """Search Auto Filter records across filename *and caption*.
 
-    Partial database failure is tolerated, but an all-database failure is
-    reported to the API instead of being mistaken for "no search results".
+    Unlike the old website implementation, this does not silently stop after
+    500 records.  A bounded safety limit can still be supplied by the caller,
+    while the default collects the complete Mongo result set needed to build a
+    title's seasons/episodes/variants.
     """
     search_filter = build_search_filter(query)
     if not search_filter:
@@ -230,31 +232,21 @@ async def search_media(query, limit=500):
 
     docs = []
     seen = set()
-    per_collection = max(1, int(limit))
     projection = {
-        "_id": 1,
-        "file_id": 1,
-        "file_name": 1,
-        "file_size": 1,
-        "file_type": 1,
-        "mime_type": 1,
-        "caption": 1,
-        "file_ref": 1,
+        "_id": 1, "file_id": 1, "file_name": 1, "file_size": 1,
+        "file_type": 1, "mime_type": 1, "caption": 1, "file_ref": 1,
     }
     configured = 0
     succeeded = 0
     errors = []
+    remaining = None if limit is None else max(1, int(limit))
 
     for name, collection in (("primary", media), ("secondary", media2)):
         if collection is None:
             continue
         configured += 1
         try:
-            cursor = (
-                collection.find(search_filter, projection)
-                .sort("$natural", -1)
-                .limit(per_collection)
-            )
+            cursor = collection.find(search_filter, projection).sort("$natural", -1)
             async for doc in cursor:
                 key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
                 if key and key in seen:
@@ -262,13 +254,12 @@ async def search_media(query, limit=500):
                 if key:
                     seen.add(key)
                 docs.append(doc)
-                if len(docs) >= limit:
+                if remaining is not None and len(docs) >= remaining:
                     return docs
             succeeded += 1
         except Exception as exc:
             errors.append(f"{name}: {type(exc).__name__}")
             LOGGER.exception("%s MongoDB search failed", name)
-            continue
 
     if configured == 0:
         raise RuntimeError("No MongoDB database is configured")
@@ -279,6 +270,53 @@ async def search_media(query, limit=500):
         )
     return docs
 
+
+async def fuzzy_search_media(query, limit=80):
+    """Cheap local fuzzy fallback modeled on Ultron's fuzzy search.
+
+    MongoDB first narrows candidates using distinctive three-character prefixes;
+    Python then scores the real stored filenames/captions. No external service
+    is allowed to manufacture a result.
+    """
+    import re
+    from difflib import SequenceMatcher
+
+    def norm(value):
+        return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold())).strip()
+
+    q = norm(query)
+    if len(q) < 2:
+        return []
+    tokens = [t for t in q.split() if len(t) >= 3]
+    prefixes = list(dict.fromkeys(t[:3] for t in tokens))[:4] or [q[:3]]
+    pattern = re.compile("|".join(re.escape(x) for x in prefixes), re.I)
+    mongo_filter = {"$or": [{"file_name": {"$regex": pattern}}, {"caption": {"$regex": pattern}}]}
+    projection = {"_id": 1, "file_id": 1, "file_name": 1, "file_size": 1,
+                  "file_type": 1, "mime_type": 1, "caption": 1, "file_ref": 1}
+
+    candidates = []
+    seen = set()
+    for collection in (media, media2):
+        if collection is None:
+            continue
+        try:
+            rows = await collection.find(mongo_filter, projection).limit(max(100, limit * 6)).to_list(length=max(100, limit * 6))
+        except Exception:
+            continue
+        for row in rows:
+            key = _normalize_id(row.get("_id")) or _normalize_id(row.get("file_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            name = norm(row.get("file_name"))
+            caption = norm(row.get("caption"))
+            score = max(SequenceMatcher(None, q, name).ratio(), SequenceMatcher(None, q, caption).ratio())
+            if name:
+                score = max(score, sum(max(SequenceMatcher(None, t, n).ratio() for n in name.split()) for t in q.split()) / max(1, len(q.split())))
+            if score >= (0.70 if len(q) > 5 else 0.82):
+                candidates.append((score, row))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return [row for _, row in candidates[:limit]]
 
 
 async def search_media_by_title(title, limit=500):
