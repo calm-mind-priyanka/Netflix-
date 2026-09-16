@@ -181,140 +181,213 @@ function renderContinue(){
   bind();
 }
 
-async function renderAutoFilter(title, mount, initialSeason=null, initialEpisode=null){
+async function renderAutoFilter(title, mount, initialSeason=null, initialEpisode=null, initialLanguage=null, initialQuality=null){
   const esc=escapeHtml;
-  const state={season:initialSeason,episode:initialEpisode,language:null,quality:null};
-  let options;
-  try{
-    options=await API.get("/api/filter-options?"+new URLSearchParams({title:title.title,id:title.id}));
-  }catch(e){
-    mount.innerHTML=`<div class="state error">Filter options unavailable.</div>`;
-    return;
+  const state={
+    season:initialSeason,
+    episode:initialEpisode,
+    language:initialLanguage,
+    quality:initialQuality
+  };
+
+  // The detail response already contains the bounded real-file pool. Derive
+  // controls from that pool so we never invent seasons/episodes or make a
+  // second Mongo request just to draw the filter UI.
+  const variants=[];
+  if(title.type==="series"){
+    for(const season of (title.seasons||[])){
+      for(const episode of (season.episodes||[])){
+        for(const variant of (episode.variants||[])){
+          variants.push(variant);
+        }
+      }
+    }
+  }else{
+    variants.push(...(title.variants||[]));
   }
 
-  const button=(kind,value,label=value)=>`<button type="button" class="afChoice" data-af-kind="${esc(kind)}" data-af-value="${esc(value)}">${esc(label)}</button>`;
+  const actualSeasons=[...new Set((title.available_seasons||title.seasons?.map(x=>x.season)||[]).map(Number))]
+    .filter(Number.isFinite).sort((a,b)=>a-b);
+  const normalSeasons=actualSeasons.filter(value=>value>=1&&value<=15);
+  const extendedSeasons=actualSeasons.filter(value=>value>15);
+
+  const actualLanguages=[...new Set(
+    variants.flatMap(v=>[
+      ...(v.audio_languages||[]),
+      ...(v.languages||[])
+    ]).filter(Boolean).map(String)
+  )].sort((a,b)=>a.localeCompare(b));
+  const languages=actualLanguages.length
+    ?actualLanguages
+    :["Malayalam","Tamil","English","Hindi","Telugu","Kannada","Gujarati","Marathi","Punjabi"];
+
+  const actualQualities=[...new Set(
+    variants.map(v=>String(v.quality||"").trim()).filter(v=>v&&v.toLowerCase()!=="auto")
+  )].sort((a,b)=>{
+    const an=parseInt(a,10)||0, bn=parseInt(b,10)||0;
+    return an-bn||a.localeCompare(b);
+  });
+  const qualities=actualQualities.length
+    ?actualQualities
+    :["360P","480P","720P","1080P","1440P","2160P"];
+
+  const episodesForSeason=seasonNumber=>{
+    const season=(title.seasons||[]).find(item=>Number(item.season)===Number(seasonNumber));
+    return [...new Set((season?.episode_numbers||season?.episodes?.map(x=>x.episode)||[]).map(Number))]
+      .filter(Number.isFinite).sort((a,b)=>a-b);
+  };
+
+  const button=(kind,value,label=value,active=false)=>`<button type="button" class="afChoice${active?" active":""}" data-af-kind="${esc(kind)}" data-af-value="${esc(value)}">${esc(label)}</button>`;
   const selectedLabel=()=>[
     state.season!=null?`Season ${state.season}`:null,
-    state.episode!=null?`Episode ${state.episode}`:null,
-    state.language,
-    state.quality
+    state.episode!=null?`Episode ${String(state.episode).padStart(2,"0")}`:null,
+    state.language?`Language: ${state.language}`:null,
+    state.quality?`Quality: ${state.quality}`:null
   ].filter(Boolean).join(" • ") || "Select an option";
 
-  function draw(message=""){
-    const seasons=options.seasons||[];
-    const episodes=state.season!=null?(options.episodes?.[String(state.season)]||[]):[];
-    mount.innerHTML=`<div class="variantChoices" style="padding:18px;margin-top:18px;border:1px solid rgba(255,255,255,.12);border-radius:16px;background:rgba(255,255,255,.035)">
-      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
-        <div><b>Auto Filter</b><small style="display:block;opacity:.65;margin-top:4px">${esc(selectedLabel())}</small></div>
-        <span id="afStatus" style="opacity:.7;font-size:.9rem">${esc(message)}</span>
+  function draw(statusText="",statusKind="idle"){
+    const episodes=state.season!=null?episodesForSeason(state.season):[];
+    const extendedSelected=state.season!=null && state.season>15;
+    mount.innerHTML=`<section class="variantChoices autoFilterPanel">
+      <div class="afHeader">
+        <div>
+          <b>🔎 AUTO FILTER ACTIVE</b>
+          <small>${esc(title.title)}${selectedLabel()!=="Select an option"?" • "+esc(selectedLabel()):""}</small>
+        </div>
+        <span id="afStatus" class="afStatus ${esc(statusKind)}">${esc(statusText)}</span>
       </div>
-      ${title.type==="series"?`<div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Season</small><div style="display:flex;flex-wrap:wrap;gap:8px">${seasons.map(v=>button("season",String(v).replace(/\D/g,""),v)).join("")}</div></div>`:""}
-      ${title.type==="series"&&state.season!=null?`<div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Episode</small><div style="display:flex;flex-wrap:wrap;gap:8px">${episodes.map(v=>button("episode",String(v),`Episode ${v}`)).join("")||"<span style='opacity:.6'>No episodes found for this season.</span>"}</div></div>`:""}
-      <div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Language</small><div style="display:flex;flex-wrap:wrap;gap:8px">${(options.languages||[]).map(v=>button("language",v)).join("")}</div></div>
-      <div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Quality</small><div style="display:flex;flex-wrap:wrap;gap:8px">${(options.qualities||[]).map(v=>button("quality",v)).join("")}</div></div>
-      <div id="afResult" style="margin-top:16px"></div>
-    </div>`;
+
+      ${title.type==="series" ? `<div class="afGroup"><small>Season</small>
+        <div class="afChoices">
+          ${normalSeasons.map(v=>button("season",v,`Season ${v}`,state.season===v)).join("")}
+          ${extendedSeasons.length?button("more","extended","AUTO / MORE",extendedSelected):""}
+        </div>
+        ${extendedSelected?`<div class="afChoices afExtended">
+          ${extendedSeasons.map(v=>button("season",v,`Season ${v}`,state.season===v)).join("")}
+        </div>`:""}
+      </div>`:""}
+
+      ${title.type==="series"&&state.season!=null?`<div class="afGroup"><small>Episode</small>
+        <div class="afChoices">
+          ${episodes.map(v=>button("episode",v,`Episode ${String(v).padStart(2,"0")}`,state.episode===v)).join("")||
+            "<span class='afEmpty'>No actual episodes found for this season.</span>"}
+        </div>
+      </div>`:""}
+
+      <div class="afGroup"><small>Language</small><div class="afChoices">
+        ${languages.map(v=>button("language",v,v,state.language===v)).join("")}
+      </div></div>
+
+      <div class="afGroup"><small>Quality</small><div class="afChoices">
+        ${qualities.map(v=>button("quality",v,v,state.quality===v)).join("")}
+      </div></div>
+
+      <div id="afResult" class="afResult"></div>
+    </section>`;
+
     mount.querySelectorAll(".afChoice").forEach(btn=>btn.onclick=async()=>{
       const kind=btn.dataset.afKind, value=btn.dataset.afValue;
-      if(kind==="season"){
-        state.season=Number(value); state.episode=null; state.language=null; state.quality=null;
-        draw("Choose an episode or another filter"); return;
+
+      if(kind==="more"){
+        if(!extendedSeasons.length)return;
+        if(state.season==null || state.season<=15) state.season=extendedSeasons[0];
+        state.episode=null;
+        draw("Select an actual extended season","ready");
+        return;
       }
-      if(kind==="episode"){state.episode=Number(value);}
-      if(kind==="language"){state.language=value;}
-      if(kind==="quality"){state.quality=value;}
+
+      if(kind==="season"){
+        state.season=Number(value);
+        state.episode=null;
+        draw("Select an actual episode or another filter","ready");
+        return;
+      }
+
+      if(kind==="episode") state.episode=Number(value);
+      if(kind==="language") state.language=value;
+      if(kind==="quality") state.quality=value;
       await checkSelection();
     });
   }
 
   async function checkSelection(){
-    const result=mount.querySelector("#afResult"), status=mount.querySelector("#afStatus");
-    if(status)status.textContent="Checking files…";
+    const result=mount.querySelector("#afResult");
+    const status=mount.querySelector("#afStatus");
+    if(status){
+      status.className="afStatus fetching";
+      status.textContent="⏳ FETCHING MATCHING FILES…";
+    }
+    if(result) result.innerHTML="";
+
     const params={title:title.title,id:title.id};
     if(title.year!=null)params.year=String(title.year);
     if(state.season!=null)params.season=String(state.season);
     if(state.episode!=null)params.episode=String(state.episode);
     if(state.language)params.language=state.language;
     if(state.quality)params.quality=state.quality;
+
     try{
       const data=await API.get("/api/filter?"+new URLSearchParams(params));
-      const file=data.file;
-      if(status)status.textContent=`${data.count} matching file${data.count===1?"":"s"}`;
-      if(result)result.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 0">
-        <span>${esc(file?.file_name||"Matching files found")}</span>
-        ${file?.file_id?`<button type="button" class="primary" id="afPlay">▶ Play selected</button>`:""}
-      </div>`;
-      result.querySelector("#afPlay")?.addEventListener("click",()=>{
-        const next={title:title.title,year:title.year??null,season:file.season??state.season,episode:file.episode??state.episode,variants:[file]};
-        Player.open(title.id,title.type==="series"?`${title.title} • S${String(next.season||0).padStart(2,"0")} E${String(next.episode||0).padStart(2,"0")}`:title.title,[file],null,{title:title.title,type:title.type,year:title.year??null,season:next.season,episode:next.episode});
+      const matches=Array.isArray(data.matches)?data.matches.filter(file=>file?.file_id):[];
+      const files=matches.length?matches:(data.file?.file_id?[data.file]:[]);
+      const count=Number(data.count)||files.length;
+
+      if(status){
+        status.className=`afStatus ${count?"complete":"empty"}`;
+        status.textContent=count
+          ?`✅ FILTER COMPLETE • 📁 ${count} MATCHING FILE${count===1?"":"S"} FOUND`
+          :"⚠️ NO MATCHING FILES FOUND";
+      }
+
+      if(result){
+        result.innerHTML=`<div class="afResultSummary">
+          <div>📺 ${state.season!=null?`S${String(state.season).padStart(2,"0")}${state.episode!=null?` • E${String(state.episode).padStart(2,"0")}`:""}`:"Title-wide"}
+            ${state.language?` • 🌐 ${esc(state.language)}`:""}
+            ${state.quality?` • 🎞 ${esc(state.quality)}`:""}
+          </div>
+          ${files.length?`<button type="button" class="primary" id="afPlay">🔴 PLAY</button>`:""}
+        </div>`;
+      }
+
+      result?.querySelector("#afPlay")?.addEventListener("click",()=>{
+        const file=files[0];
+        const playFiles=files.slice(0,100);
+        const season=file.season??state.season;
+        const episode=file.episode??state.episode;
+        Player.open(
+          title.id,
+          title.type==="series"
+            ?`${title.title} • S${String(season||0).padStart(2,"0")} E${String(episode||0).padStart(2,"0")}`
+            :title.title,
+          playFiles,
+          null,
+          {title:title.title,type:title.type,year:title.year??null,season,episode}
+        );
       });
     }catch(e){
-      if(status)status.textContent="No matching files";
-      if(result)result.innerHTML=`<div class="state empty" style="padding:12px 0">NO FILES WERE FOUND</div>`;
+      if(status){
+        status.className="afStatus error";
+        status.textContent="⚠️ FILTER REQUEST FAILED";
+      }
+      if(result)result.innerHTML=`<div class="state error" style="padding:12px 0">${esc(e.message||"Unable to query matching files")}</div>`;
     }
   }
 
-  draw();
-}
+  draw(
+    (initialSeason!=null||initialEpisode!=null||initialLanguage||initialQuality)
+      ?"⏳ FETCHING MATCHING FILES…"
+      :"",
+    (initialSeason!=null||initialEpisode!=null||initialLanguage||initialQuality)?"fetching":"idle"
+  );
 
-async function renderGlobalAutoFilter(query, items, mount){
-  const state={season:null,episode:null,language:null,quality:null};
-  const first=items?.[0];
-  const isSeries=items?.some(x=>x.type==="series") || /(?:s\d{1,2}|season\s*\d+|e\d{1,3}|episode\s*\d+)/i.test(query);
-  const parsedSeason=(query.match(/(?:s|season\s*)0*(\d{1,2})/i)||[])[1];
-  const parsedEpisode=(query.match(/(?:e|episode\s*)0*(\d{1,3})/i)||[])[1];
-  if(parsedSeason) state.season=Number(parsedSeason);
-  if(parsedEpisode) state.episode=Number(parsedEpisode);
-  const languages=["Malayalam","Tamil","English","Hindi","Telugu","Kannada","Gujarati","Marathi","Punjabi"];
-  const qualities=["360P","480P","720P","1080P","1440P","2160P"];
-  const seasons=Array.from({length:10},(_,i)=>i+1);
-  const episodes=Array.from({length:20},(_,i)=>i+1);
-  const esc=escapeHtml;
-  const btn=(kind,value,label=value)=>`<button type="button" class="afChoice" data-kind="${esc(kind)}" data-value="${esc(value)}">${esc(label)}</button>`;
-  const draw=(status="")=>{
-    mount.innerHTML=`<section class="variantChoices" style="padding:18px;margin-bottom:18px;border:1px solid rgba(255,255,255,.12);border-radius:16px;background:rgba(255,255,255,.035)">
-      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
-        <div><b>Auto Filter</b><small style="display:block;opacity:.65;margin-top:4px">Filters apply to all matching files</small></div>
-        <span id="globalAfStatus" style="opacity:.7;font-size:.9rem">${esc(status||`${items.length} result${items.length===1?"":"s"}`)}</span>
-      </div>
-      ${isSeries?`<div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Season</small><div style="display:flex;flex-wrap:wrap;gap:8px">${seasons.map(v=>btn("season",v,`Season ${v}`)).join("")}</div></div>`:""}
-      ${isSeries&&state.season!=null?`<div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Episode</small><div style="display:flex;flex-wrap:wrap;gap:8px">${episodes.map(v=>btn("episode",v,`Episode ${v}`)).join("")}</div></div>`:""}
-      <div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Language</small><div style="display:flex;flex-wrap:wrap;gap:8px">${languages.map(v=>btn("language",v)).join("")}</div></div>
-      <div style="margin-top:16px"><small style="display:block;opacity:.65;margin-bottom:8px">Quality</small><div style="display:flex;flex-wrap:wrap;gap:8px">${qualities.map(v=>btn("quality",v)).join("")}</div></div>
-      <div id="globalAfResult" style="margin-top:16px"></div>
-    </section>`;
-    mount.querySelectorAll(".afChoice").forEach(button=>button.onclick=async()=>{
-      const kind=button.dataset.kind,value=button.dataset.value;
-      if(kind==="season"){state.season=Number(value);state.episode=null;}
-      else if(kind==="episode") state.episode=Number(value);
-      else if(kind==="language") state.language=value;
-      else if(kind==="quality") state.quality=value;
-      await check();
-    });
-  };
-  async function check(){
-    const status=mount.querySelector("#globalAfStatus"),result=mount.querySelector("#globalAfResult");
-    if(status)status.textContent="Checking all matching files…";
-    const params={q:query};
-    if(state.season!=null)params.season=state.season;
-    if(state.episode!=null)params.episode=state.episode;
-    if(state.language)params.language=state.language;
-    if(state.quality)params.quality=state.quality;
-    try{
-      const data=await API.get("/api/filter?"+new URLSearchParams(params));
-      if(status)status.textContent=`${data.count} matching file${data.count===1?"":"s"}`;
-      const file=data.file;
-      if(result)result.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 0"><span>${esc(file?.file_name||"Matching files found")}</span>${file?.file_id?`<button type="button" class="primary" id="globalAfPlay">▶ Play selected</button>`:""}</div>`;
-      result?.querySelector("#globalAfPlay")?.addEventListener("click",()=>Player.open(file.file_id,file.file_name,[file],null,{title:file.title,type:file.type,year:file.year,season:file.season,episode:file.episode}));
-    }catch(e){
-      if(status)status.textContent="No matching files";
-      if(result)result.innerHTML=`<div class="state empty" style="padding:12px 0">NO FILES WERE FOUND</div>`;
-    }
+  // A search containing S/E (and optional language/quality tokens) should
+  // immediately filter the real raw files instead of requiring another click.
+  if(initialSeason!=null||initialEpisode!=null||initialLanguage||initialQuality){
+    await checkSelection();
   }
-  draw();
 }
 
-async function showDetails(id,preferredSeason=null,preferredEpisode=null){
+async function showDetails(id,preferredSeason=null,preferredEpisode=null,preferredLanguage=null,preferredQuality=null){
   try{
     const localTitle=
       titles.find(item=>item.id===id)||
@@ -328,20 +401,15 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
           "/api/title/"+encodeURIComponent(id)+
           "?q="+encodeURIComponent(localTitle.title)
         );
-        if(expanded?.id===id) title=expanded;
+        if(expanded?.id===id || expanded?.title) title=expanded;
       }catch(_){
-        // Keep the already returned search/home object usable if the targeted
-        // expansion is temporarily unavailable.
+        // Keep the already returned search/home object usable if expansion is unavailable.
       }
     }else{
-      title=await API.get(
-        "/api/title/"+encodeURIComponent(id)
-      );
+      title=await API.get("/api/title/"+encodeURIComponent(id));
     }
 
-    if(!title){
-      throw new Error("Title not found");
-    }
+    if(!title) throw new Error("Title not found");
 
     $("#details").classList.remove("hidden");
 
@@ -355,184 +423,119 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null){
         <h1>${escapeHtml(title.title)}</h1>
         <p>
           ${escapeHtml(title.description||"")}
-          ${title.rating
-            ?`<br>★ ${Number(title.rating).toFixed(1)}`
-            :""
-          }
+          ${title.rating?`<br>★ ${Number(title.rating).toFixed(1)}`:""}
         </p>
       </div>
     </div>`;
 
+    // Preserve the original Netflix detail/episode interface. The Auto Filter
+    // panel is mounted inside this same detail screen rather than replacing it.
     if(title.type==="movie"){
-      html+=`<div id="autoFilterPanel"></div>`;
-      $("#detailBody").innerHTML=html;
-      await renderAutoFilter(title,$("#autoFilterPanel"));
-      return;
+      html+=`<section class="variantChoices">
+        <div class="episode">
+          <span>Choose language, quality and source from Player Settings.</span>
+          <button class="primary" id="playMovie">▶ Play</button>
+        </div>
+      </section>`;
+    }else{
+      const allSeasons=Array.isArray(title.seasons)?title.seasons:[];
+      const seasons=preferredSeason!=null
+        ?allSeasons.filter(item=>Number(item.season)===Number(preferredSeason))
+        :allSeasons;
+
+      if(!seasons.length){
+        html+='<div class="state empty">No episodes found for this series.</div>';
+      }else{
+        html+=seasons.map((season,seasonIndex)=>`<section>
+          <h2>Season ${season.season}</h2>
+          ${(season.episodes||[]).map((episode,episodeIndex)=>{
+            const highlighted=preferredEpisode!=null && Number(episode.episode)===Number(preferredEpisode);
+            return `<div class="episode ${highlighted?"search-highlight":""}">
+              <span>Episode ${episode.episode}${highlighted?" ← selected":""}</span>
+              <button class="primary episodePlay" data-season="${season.season}" data-episode="${episode.episode}">▶</button>
+            </div>`;
+          }).join("")}
+        </section>`).join("");
+      }
     }
 
+    // Keep Auto Filter in the original detail page. It supplies the real-file
+    // lookup and extended-season controls without creating another page/UI.
     html+=`<div id="autoFilterPanel"></div>`;
     $("#detailBody").innerHTML=html;
-    await renderAutoFilter(title,$("#autoFilterPanel"),preferredSeason,preferredEpisode);
-    return;
 
     if(title.type==="movie"){
       const variants=Array.isArray(title.variants)?title.variants:[];
-
-      html+=`<section class="variantChoices">
-        <div class="episode"><span>Choose language, quality and source from Player Settings.</span><button class="primary" id="playMovie">▶ Play</button></div>
-      </section>`;
-
-      $("#detailBody").innerHTML=html;
-      $("#playMovie").onclick=()=>Player.open(title.id,title.title,variants,null,{title:title.title,type:title.type,year:title.year??null});
-      return;
-    }
-
-    const allSeasons=
-      Array.isArray(title.seasons)
-        ?title.seasons
-        :[];
-    const seasons=preferredSeason!=null
-      ?allSeasons.filter(item=>item.season===preferredSeason)
-      :allSeasons;
-
-    if(!seasons.length){
-
-      html+=
-        '<div class="state empty">No episodes found for this series.</div>';
-
+      $("#playMovie").onclick=()=>Player.open(
+        title.id,title.title,variants,null,
+        {title:title.title,type:title.type,year:title.year??null}
+      );
     }else{
+      const allSeasons=Array.isArray(title.seasons)?title.seasons:[];
+      const seasons=preferredSeason!=null
+        ?allSeasons.filter(item=>Number(item.season)===Number(preferredSeason))
+        :allSeasons;
 
-      html+=seasons.map(
-        (season,seasonIndex)=>`<section>
-          <h2>Season ${season.season}</h2>
-
-          ${(season.episodes||[]).map(
-            (episode,episodeIndex)=>{
-              const highlighted=preferredEpisode!=null && episode.episode===preferredEpisode;
-
-              const nextEpisode=
-                season.episodes?.[episodeIndex+1];
-
-              const nextSeason=
-                seasons[seasonIndex+1]?.episodes?.[0];
-
-              const next=nextEpisode
-                ?{
-                    title:title.title,
-                    season:season.season,
-                    episode:nextEpisode.episode,
-                    variants:nextEpisode.variants||[]
-                  }
-                :nextSeason
-                  ?{
-                      title:title.title,
-                      season:seasons[seasonIndex+1].season,
-                      episode:nextSeason.episode,
-                      variants:nextSeason.variants||[]
-                    }
-                  :null;
-
-              return `<div class="episode ${highlighted?"search-highlight":""}">
-                <span>Episode ${episode.episode}${highlighted?" ← selected":""}</span>
-
-                <button
-                  class="primary episodePlay"
-                  data-season="${season.season}"
-                  data-episode="${episode.episode}">
-                  ▶
-                </button>
-              </div>`;
-            }
-          ).join("")}
-
-        </section>`
-      ).join("");
-    }
-
-    $("#detailBody").innerHTML=html;
-
-    $("#detailBody")
-      .querySelectorAll(".episodePlay")
-      .forEach(button=>{
-
-        const seasonNumber=
-          Number(button.dataset.season);
-
-        const episodeNumber=
-          Number(button.dataset.episode);
-
-        const season=
-          seasons.find(
-            item=>item.season===seasonNumber
-          );
-
-        const episode=
-          season?.episodes?.find(
-            item=>item.episode===episodeNumber
-          );
-
-        const seasonIndex=
-          seasons.findIndex(
-            item=>item.season===seasonNumber
-          );
-
-        const episodeIndex=
-          season?.episodes?.findIndex(
-            item=>item.episode===episodeNumber
-          )??-1;
-
-        const nextEpisode=
-          season?.episodes?.[episodeIndex+1];
-
-        const nextSeason=
-          seasons[seasonIndex+1]?.episodes?.[0];
-
-        const next=nextEpisode
-          ?{
-              title:title.title,
-              year:title.year??null,
-              season:seasonNumber,
-              episode:nextEpisode.episode,
-              variants:nextEpisode.variants||[]
-            }
-          :nextSeason
-            ?{
-                title:title.title,
-                year:title.year??null,
-                season:seasons[seasonIndex+1].season,
-                episode:nextSeason.episode,
-                variants:nextSeason.variants||[]
-              }
-            :null;
-
+      $("#detailBody").querySelectorAll(".episodePlay").forEach(button=>{
+        const seasonNumber=Number(button.dataset.season);
+        const episodeNumber=Number(button.dataset.episode);
+        const season=allSeasons.find(item=>Number(item.season)===seasonNumber);
+        const episode=season?.episodes?.find(item=>Number(item.episode)===episodeNumber);
+        const seasonIndex=allSeasons.findIndex(item=>Number(item.season)===seasonNumber);
+        const episodeIndex=season?.episodes?.findIndex(item=>Number(item.episode)===episodeNumber)??-1;
+        const nextEpisode=season?.episodes?.[episodeIndex+1];
+        const nextSeason=allSeasons[seasonIndex+1]?.episodes?.[0];
+        const next=nextEpisode?{
+          title:title.title,year:title.year??null,season:seasonNumber,
+          episode:nextEpisode.episode,variants:nextEpisode.variants||[]
+        }:nextSeason?{
+          title:title.title,year:title.year??null,season:allSeasons[seasonIndex+1].season,
+          episode:nextSeason.episode,variants:nextSeason.variants||[]
+        }:null;
         button.onclick=()=>Player.open(
           title.id,
           `${title.title} • S${String(seasonNumber).padStart(2,"0")} E${String(episodeNumber).padStart(2,"0")}`,
-          episode?.variants||[],
-          next,
+          episode?.variants||[],next,
           {title:title.title,type:"series",year:title.year??null,season:seasonNumber,episode:episodeNumber}
         );
       });
+    }
 
-  }catch(error){
-    alert(
-      error.message||
-      "Unable to open title"
+    await renderAutoFilter(
+      title,
+      $("#autoFilterPanel"),
+      preferredSeason,
+      preferredEpisode,
+      preferredLanguage,
+      preferredQuality
     );
+  }catch(error){
+    alert(error.message||"Unable to open title");
   }
 }
 
 let searchRequestController=null;
 let searchSequence=0;
+let searchInFlight=false;
+let lastSubmittedQuery="";
 
 async function doSearch(){
   const query=$("#query").value.trim();
-  const sequence=++searchSequence;
-
   if(!query){
     $("#results").innerHTML='<div class="state">Type a movie or series name.</div>';
     return;
   }
+
+  // One request per submitted query. Double-clicks and repeated Enter presses
+  // while the same request is running are ignored; an already completed query
+  // is also not fetched again until the user changes it.
+  if(searchInFlight || query.toLowerCase()===lastSubmittedQuery){
+    return;
+  }
+
+  searchInFlight=true;
+  const sequence=++searchSequence;
+  lastSubmittedQuery=query.toLowerCase();
 
   state($("#results"),"Searching…");
 
@@ -554,21 +557,33 @@ async function doSearch(){
       return;
     }
 
-    // Search now opens the ORIGINAL Netflix detail presentation directly.
-    // Season/episode in the query are passed as the preferred selection; the
-    // detail page still owns all Language/Quality/Season/Episode controls.
     const first=data.items[0];
-    const seasonMatch=query.match(/(?:\bs|season\s*)0*(\d{1,2})\b/i);
-    const episodeMatch=query.match(/(?:\be|episode\s*)0*(\d{1,3})\b/i);
+    const seasonMatch=query.match(/(?:\bs|season\s*)0*(\d{1,3})\b/i);
+    const episodeMatch=query.match(/(?:\be|episode\s*)0*(\d{1,4})\b/i);
     const season=seasonMatch?Number(seasonMatch[1]):null;
     const episode=episodeMatch?Number(episodeMatch[1]):null;
 
+    // normalize_query is the backend source of truth for metadata tokens.
+    // These client-side extractions only seed the existing detail filter state.
+    const languageNames=["Malayalam","Tamil","English","Hindi","Telugu","Kannada","Gujarati","Marathi","Punjabi"];
+    const language=languageNames.find(name=>new RegExp(`(?:^|[^a-z])${name}(?:$|[^a-z])`,"i").test(query))||null;
+    const qualityMatch=query.match(/(?:^|[\s._-])(\d{3,4})p?(?:$|[\s._-])/i);
+    const quality=qualityMatch?`${qualityMatch[1]}P`:null;
+
     $("#search").classList.add("hidden");
-    await showDetails(first.id,season,episode);
+    await showDetails(first.id,season,episode,language,quality);
   }catch(error){
     if(error?.name==="AbortError" || sequence!==searchSequence)return;
     state($("#results"),`Search failed: ${error.message||"backend error"}`,"error");
+    lastSubmittedQuery="";
+  }finally{
+    searchInFlight=false;
   }
+}
+
+function openSearch(){
+  $("#search").classList.remove("hidden");
+  $("#query").focus();
 }
 
 function showHome(){
@@ -581,15 +596,13 @@ function showHome(){
 $("#bottomHome").onclick=showHome;
 
 $("#searchBtn").onclick=()=>{
-  $("#search").classList.remove("hidden");
-  $("#query").focus();
-  doSearch();
+  if($("#search").classList.contains("hidden")) openSearch();
+  else doSearch();
 };
 
 $("#bottomSearch").onclick=()=>{
-  $("#search").classList.remove("hidden");
-  $("#query").focus();
-  doSearch();
+  if($("#search").classList.contains("hidden")) openSearch();
+  else doSearch();
 };
 
 $("#closeSearch").onclick=()=>{
@@ -612,19 +625,9 @@ $("#closePlayer").onclick=()=>{
   Player.close();
 };
 
-$("#query").oninput=()=>{
-  clearTimeout(window.searchTimer);
-
-  window.searchTimer=
-    setTimeout(
-      doSearch,
-      650
-    );
-};
-
 $("#query").onkeydown=event=>{
   if(event.key==="Enter"){
-    clearTimeout(window.searchTimer);
+    event.preventDefault();
     doSearch();
   }
 };
