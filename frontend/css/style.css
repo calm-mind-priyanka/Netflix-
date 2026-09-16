@@ -61,3 +61,28 @@ main{padding-bottom:calc(78px + env(safe-area-inset-bottom))}
 
 /* Auto Filter controls use the original Netflix button language. */
 .afChoice.active{background:#e50914;color:#fff;font-weight:800;outline:1px solid #ff5960}.afChoice.active:hover{background:#b20710}
+
+/* Compact phone-friendly Auto Filter status/control styling. */
+.autoFilterPanel{margin-top:18px;padding:16px;border:1px solid rgba(255,255,255,.12);border-radius:16px;background:rgba(255,255,255,.035)}
+.afHeader{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.afHeader b{display:block;font-size:.95rem}
+.afHeader small{display:block;opacity:.7;margin-top:5px;line-height:1.35}
+.afStatus{display:block;font-size:.82rem;font-weight:700;line-height:1.35;text-align:right;max-width:100%;opacity:.9}
+.afStatus.fetching{color:#fff}
+.afStatus.complete{color:#8df0a8}
+.afStatus.empty{color:#ffd37a}
+.afStatus.error{color:#ff8585}
+.afGroup{margin-top:15px}
+.afGroup>small{display:block;opacity:.65;margin-bottom:8px}
+.afChoices{display:flex;flex-wrap:wrap;gap:7px}
+.afChoice{padding:8px 11px;font-size:.88rem}
+.afChoice.active{background:#e50914;color:#fff;font-weight:800;outline:1px solid #ff5960}
+.afExtended{margin-top:8px;padding:9px;border-left:2px solid #e50914}
+.afEmpty{opacity:.6;font-size:.88rem}
+.afResult{margin-top:15px}
+.afResultSummary{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 0;border-top:1px solid rgba(255,255,255,.08)}
+@media(max-width:480px){
+  .autoFilterPanel{padding:14px}
+  .afStatus{text-align:left;width:100%}
+  .afChoice{padding:7px 9px;font-size:.82rem}
+}
