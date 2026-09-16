@@ -80,7 +80,7 @@ HOME_CACHE_TIME = 0.0
 HOME_DOC_LIMIT = 300
 HOME_TITLE_LIMIT = 100
 HOME_ENRICH_LIMIT = 100
-SEARCH_ENRICH_LIMIT = 50
+SEARCH_ENRICH_LIMIT = 1
 # Never let an environment value such as 10000 turn one HTTP request into a
 # huge in-memory MongoDB result set. The exact title can still have many real
 # variants; 300 is the default/safety ceiling for a single web request on Koyeb Free.
@@ -185,7 +185,6 @@ async def tmdb_meta(title, kind, year=None):
                         title,
                         body[:180],
                     )
-                    _tmdb_cache_put(key, {})
                     return {}
                 data = await response.json(content_type=None)
 
@@ -197,7 +196,6 @@ async def tmdb_meta(title, kind, year=None):
             results[0] if results else None,
         )
         if not result:
-            _tmdb_cache_put(key, {})
             return {}
 
         date = result.get("first_air_date") or result.get("release_date") or ""
@@ -212,7 +210,6 @@ async def tmdb_meta(title, kind, year=None):
         return output
     except Exception:
         LOGGER.exception("TMDB lookup failed for %s", title)
-        _tmdb_cache_put(key, {})
         return {}
 
 
@@ -462,10 +459,13 @@ async def search(request):
         if SEARCH_INFLIGHT.get(key) is task:
             SEARCH_INFLIGHT.pop(key, None)
 
-    SEARCH_CACHE[key] = (time.time(), selected)
-    SEARCH_CACHE.move_to_end(key)
-    while len(SEARCH_CACHE) > SEARCH_CACHE_MAX:
-        SEARCH_CACHE.popitem(last=False)
+    # Never cache an empty search result. A transient DB/network condition must
+    # not turn into a sticky false "0 results" response.
+    if selected:
+        SEARCH_CACHE[key] = (time.time(), selected)
+        SEARCH_CACHE.move_to_end(key)
+        while len(SEARCH_CACHE) > SEARCH_CACHE_MAX:
+            SEARCH_CACHE.popitem(last=False)
     return web.json_response({"ok": True, "items": selected, "count": len(selected)})
 
 
@@ -485,10 +485,11 @@ async def _cached_or_search_items(query):
     finally:
         if SEARCH_INFLIGHT.get(key) is task:
             SEARCH_INFLIGHT.pop(key, None)
-    SEARCH_CACHE[key] = (time.time(), result)
-    SEARCH_CACHE.move_to_end(key)
-    while len(SEARCH_CACHE) > SEARCH_CACHE_MAX:
-        SEARCH_CACHE.popitem(last=False)
+    if result:
+        SEARCH_CACHE[key] = (time.time(), result)
+        SEARCH_CACHE.move_to_end(key)
+        while len(SEARCH_CACHE) > SEARCH_CACHE_MAX:
+            SEARCH_CACHE.popitem(last=False)
     return result
 
 
@@ -558,7 +559,6 @@ def _same_text(value, wanted):
 
 FILTER_LANGUAGES = ["Malayalam", "Tamil", "English", "Hindi", "Telugu", "Kannada", "Gujarati", "Marathi", "Punjabi"]
 FILTER_QUALITIES = ["360P", "480P", "720P", "1080P", "1440P", "2160P"]
-FILTER_SEASONS = [f"Season {i}" for i in range(1, 11)]
 
 
 def _best_file(variants):
@@ -569,23 +569,60 @@ def _best_file(variants):
 
 
 async def filter_options(request):
-    """Return the same fixed Auto Filter controls used by the original UI.
+    """Return controls from the real files belonging to one title.
 
-    Availability is checked by /api/filter against the raw Mongo result set;
-    this endpoint only supplies the controls and title type.
+    The endpoint remains for compatibility with older clients, but it is fully
+    data-driven: seasons and episodes come from MongoDB records and no season
+    ceiling is baked into the response.
     """
     title_name=request.query.get("title","").strip()
     if not title_name:
         raise web.HTTPBadRequest(text="A title is required")
+
     target=await _load_grouped_title(title_name, None)
     if not target:
         raise web.HTTPNotFound(text="Title not found")
+
+    variants=[]
+    if target.get("type")=="series":
+        for season_item in target.get("seasons") or []:
+            for episode_item in season_item.get("episodes") or []:
+                variants.extend(episode_item.get("variants") or [])
+    else:
+        variants=list(target.get("variants") or [])
+
+    seasons=[int(item.get("season")) for item in (target.get("seasons") or [])
+             if item.get("season") is not None]
+    seasons=sorted(set(seasons))
+    episodes={
+        str(int(item.get("season"))):[
+            int(ep.get("episode")) for ep in (item.get("episodes") or [])
+            if ep.get("episode") is not None
+        ]
+        for item in (target.get("seasons") or [])
+        if item.get("season") is not None
+    }
+
+    languages=sorted(set(
+        str(value)
+        for variant in variants
+        for value in (variant.get("audio_languages") or variant.get("languages") or [])
+        if value
+    ), key=str.casefold) or FILTER_LANGUAGES
+
+    qualities=sorted(set(
+        str(variant.get("quality")).strip()
+        for variant in variants
+        if variant.get("quality") and str(variant.get("quality")).strip().lower()!="auto"
+    ), key=lambda value: (int(re.search(r"\d+",value).group()) if re.search(r"\d+",value) else 9999, value.casefold()))
+    qualities=qualities or FILTER_QUALITIES
+
     return web.json_response({
         "ok":True,
-        "languages":FILTER_LANGUAGES,
-        "qualities":FILTER_QUALITIES,
-        "seasons":[f"Season {i}" for i in range(1,16)],
-        "episodes":{str(i):list(range(1,11)) for i in range(1,16)},
+        "languages":languages,
+        "qualities":qualities,
+        "seasons":seasons,
+        "episodes":episodes,
         "type":target.get("type"),
     })
 
@@ -638,7 +675,7 @@ async def filter_media(request):
         "query":base_query,
         "exact":len(files)==1,
         "error":None if files else "NO FILES WERE FOUND",
-    },status=200 if files else 404)
+    },status=200)
 
 async def resolve(request):
     """Resolve one real Telegram file using independent metadata matching."""
