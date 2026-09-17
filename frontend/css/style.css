@@ -86,3 +86,21 @@ main{padding-bottom:calc(78px + env(safe-area-inset-bottom))}
   .afStatus{text-align:left;width:100%}
   .afChoice{padding:7px 9px;font-size:.82rem}
 }
+
+
+/* Mobile-safe horizontal content rows: cards must not shrink into overlapping slivers. */
+.row{align-items:flex-start;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;scroll-snap-type:x proximity}
+.row .card{flex:0 0 145px;width:145px;min-width:145px;max-width:145px;scroll-snap-align:start}
+.posterImage{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit}
+.card strong,.card small{max-width:100%;display:block}
+@media(max-width:480px){
+  .row{gap:12px;padding-left:2px;padding-right:2px}
+  .row .card{flex:0 0 128px;width:128px;min-width:128px;max-width:128px}
+  .row .poster{width:128px}
+}
+@media(min-width:800px){
+  .row .card{flex-basis:180px;width:180px;min-width:180px;max-width:180px}
+  .row .poster{width:180px}
+}
+.afChoice:disabled{opacity:.35;cursor:not-allowed;transform:none;background:#1a1a1a}
+.afChoice:disabled:hover{background:#1a1a1a;transform:none}
