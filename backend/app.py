@@ -42,6 +42,8 @@ from .database import (
     search_media_by_title,
     fuzzy_search_media,
     search_media_with_filters,
+    media,
+    media2,
 )
 from .parser import (
     normalize,
