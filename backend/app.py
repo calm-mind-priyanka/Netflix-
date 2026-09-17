@@ -413,7 +413,8 @@ async def _search_uncached(query):
 
     # Group only the SEARCH PRESENTATION by logical title. The underlying
     # Mongo records remain individual raw files and are never collapsed for
-    # Auto Filter/playback.
+    # Auto Filter/playback. The group id is the same canonical title identity
+    # used by the title endpoint, never a raw file id.
     grouped = {}
     for item in raw_items:
         title = str(item.get("title") or "Untitled").strip()
@@ -422,14 +423,20 @@ async def _search_uncached(query):
         key = (normalize_for_search(title), kind, year)
         if key not in grouped:
             copy = dict(item)
-            copy["id"] = f"file:{copy.get('file_id') or len(grouped)}"
+            copy["id"] = stable_id(title, kind, year)
             copy["raw_match_count"] = 0
             grouped[key] = copy
         grouped[key]["raw_match_count"] += 1
 
     selected = list(grouped.values())
+    # Prefer an exact logical-title match. For example, searching "Toxic"
+    # must select the real Toxic movie before "Toxic Love Story" even when
+    # the latter has more matching release files. For series, S/E remains a
+    # selection hint only; it never changes the main title identity.
+    query_title_norm = normalize_for_search(search_title)
     selected.sort(
         key=lambda item: (
+            0 if normalize_for_search(item.get("title")) == query_title_norm else 1,
             0 if (parsed.get("season") is None or item.get("season") == parsed.get("season"))
             and (parsed.get("episode") is None or item.get("episode") == parsed.get("episode")) else 1,
             -int(item.get("raw_match_count") or 0),
@@ -529,7 +536,19 @@ async def _load_grouped_title(title_name, title_id=None, year=None):
         else:
             return None
     if title_id:
-        return next((item for item in items if item.get("id") == title_id), None)
+        # Search results use the canonical title identity. Accept both the
+        # canonical id and the legacy catalog id so existing deep links remain
+        # valid after deployment.
+        target = next((item for item in items if item.get("id") == title_id), None)
+        if target:
+            return target
+        target = next(
+            (item for item in items
+             if stable_id(item.get("title"), item.get("type", "movie"), item.get("year")) == str(title_id)),
+            None,
+        )
+        if target:
+            return target
     wanted = normalize_for_search(search_name)
     exact = [item for item in items if normalize_for_search(item.get("title")) == wanted]
     if exact:
@@ -545,9 +564,8 @@ async def title(request):
     except ValueError:
         raise web.HTTPBadRequest(text="Invalid year")
 
-    # Search results are raw Auto Filter file records. When the search UI
-    # opens the first result automatically, resolve that raw id back to its
-    # logical Netflix title instead of treating the file id as a catalog id.
+    # Legacy search results used raw file ids. Keep a compatibility path for
+    # cached/deep-linked clients, while new results use the canonical title id.
     if str(title_id).startswith("file:"):
         for _key, (stamp, cached_items) in list(SEARCH_CACHE.items()):
             if time.time() - stamp >= SEARCH_CACHE_TTL:
