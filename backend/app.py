@@ -79,7 +79,7 @@ GROUP_CACHE_TTL = 120
 GROUP_CACHE_MAX = 64
 GROUP_INFLIGHT = {}
 SEARCH_SEMAPHORE = asyncio.Semaphore(3)
-SEARCH_CANDIDATE_LIMIT = min(max(80, int(os.getenv("SEARCH_CANDIDATE_LIMIT", "120"))), 300)
+SEARCH_CANDIDATE_LIMIT = min(max(120, int(os.getenv("SEARCH_CANDIDATE_LIMIT", "250"))), 500)
 HOME_CACHE = None
 HOME_CACHE_TIME = 0.0
 
@@ -93,7 +93,7 @@ SEARCH_ENRICH_LIMIT = 1
 # Never let an environment value such as 10000 turn one HTTP request into a
 # huge in-memory MongoDB result set. The exact title can still have many real
 # variants; 300 is the default/safety ceiling for a single web request on Koyeb Free.
-TITLE_VARIANT_LIMIT = min(max(500, int(SEARCH_MAX_DOCS)), 1500)
+TITLE_VARIANT_LIMIT = min(max(300, int(SEARCH_MAX_DOCS)), 1500)
 
 # Maintenance is deliberately kept in memory. The website must not create or
 # modify a collection inside the Auto Filter Bot's MongoDB database.
@@ -553,7 +553,12 @@ async def _load_grouped_title(title_name, title_id=None, year_hint=None):
             errors = []
             for db_name, collection in configured:
                 try:
-                    cursor = collection.find(search_filter, projection).sort("$natural", -1)
+                    # Hard bound this reconstruction pass. The previous code
+                    # streamed every matching document in the AutoFilter collection,
+                    # which could make a single search consume all Koyeb CPU/RAM.
+                    cursor = (collection.find(search_filter, projection)
+                              .sort("$natural", -1)
+                              .limit(TITLE_VARIANT_LIMIT))
                     async for doc in cursor:
                         key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
                         if key and key in seen:
