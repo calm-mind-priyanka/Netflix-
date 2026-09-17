@@ -70,7 +70,17 @@ SEARCH_CACHE_TTL = 30
 SEARCH_CACHE_MAX = 256
 SEARCH_INFLIGHT = {}
 SEARCH_SEMAPHORE = asyncio.Semaphore(3)
-SEARCH_CANDIDATE_LIMIT = min(max(80, int(os.getenv("SEARCH_CANDIDATE_LIMIT", "120"))), 300)
+# Search must see the complete logical title pool, not only the newest 120
+# files. Otherwise a series such as Reacher can lose older seasons/episodes
+# that are already present in MongoDB. Keep the result bounded for Koyeb Free,
+# while allowing the existing SEARCH_MAX_DOCS setting to control the ceiling.
+try:
+    SEARCH_CANDIDATE_LIMIT = min(
+        max(200, int(os.getenv("SEARCH_CANDIDATE_LIMIT", str(SEARCH_MAX_DOCS)))),
+        1500,
+    )
+except (TypeError, ValueError):
+    SEARCH_CANDIDATE_LIMIT = min(max(200, int(SEARCH_MAX_DOCS)), 1500)
 HOME_CACHE = None
 HOME_CACHE_TIME = 0.0
 
