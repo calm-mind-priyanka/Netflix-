@@ -82,9 +82,7 @@ async def iter_media(query=None, projection=None, limit=None):
 
             emitted_from_collection = 0
             async for doc in cursor:
-                # file_id is the Auto Filter identity and is more stable across
-                # separate Mongo databases than Mongo's local _id.
-                key = _normalize_id(doc.get("file_id")) or _normalize_id(doc.get("_id"))
+                key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
                 if key and key in seen:
                     continue
                 if key:
@@ -198,10 +196,8 @@ async def search_media(query, limit=None):
     """Fast, read-only Auto Filter style search.
 
     The hot path is deliberately: regex -> Mongo -> small projection ->
-    bounded result list.  The caller can request the larger title pool so all
-    stored seasons/episodes/quality/language variants remain discoverable; the
-    hard ceiling prevents an unbounded collection read. No count_documents(),
-    no full collection scan in Python, and no Telegram/TMDB calls happen here.
+    bounded result list.  No count_documents(), no full collection scan in
+    Python, and no Telegram/TMDB calls happen here.
     """
     search_filter = build_search_filter(query)
     if not search_filter:
@@ -214,29 +210,24 @@ async def search_media(query, limit=None):
     succeeded = 0
     errors = []
 
-    # Search every configured database independently. Do not let a full
-    # primary window prevent the secondary Auto Filter database from being
-    # searched: with MULTIPLE_DB=True it may contain older seasons, episodes,
-    # languages, or qualities that are not present in the first database.
-    # Each database is bounded to the requested window, then duplicate file
-    # IDs are removed. This keeps the read bounded without silently hiding a
-    # valid record just because another database was filled first.
+    # Match Auto Filter's newest-first behavior.  We intentionally fetch a
+    # small primary window first and only touch the secondary DB when the
+    # primary cannot fill that window.
     for name, collection in (("primary", media), ("secondary", media2)):
-        if collection is None:
+        if collection is None or len(docs) >= bounded:
             continue
         configured += 1
+        remaining = bounded - len(docs)
         try:
             rows = await (
                 collection.find(search_filter, _SEARCH_PROJECTION)
                 .sort("$natural", -1)
-                .limit(bounded)
-                .to_list(length=bounded)
+                .limit(remaining)
+                .to_list(length=remaining)
             )
             succeeded += 1
             for doc in rows:
-                # file_id is the Auto Filter identity and is more stable across
-                # separate Mongo databases than Mongo's local _id.
-                key = _normalize_id(doc.get("file_id")) or _normalize_id(doc.get("_id"))
+                key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
                 if key and key in seen:
                     continue
                 if key:
@@ -284,9 +275,8 @@ async def fuzzy_search_media(query, limit=80):
     for collection in (media, media2):
         if collection is None:
             continue
-        candidate_limit = min(max(60, int(limit) * 4), 320)
         try:
-            rows = await collection.find(mongo_filter, projection).limit(candidate_limit).to_list(length=candidate_limit)
+            rows = await collection.find(mongo_filter, projection).limit(max(100, limit * 6)).to_list(length=max(100, limit * 6))
         except Exception:
             continue
         for row in rows:
@@ -346,15 +336,12 @@ async def search_media_with_filters(query, *, season=None, episode=None, languag
     mongo_filter=constraints[0] if len(constraints)==1 else {"$and":constraints}
     bounded=max(1,min(int(limit),1500))
     docs=[]; seen=set(); configured=0; succeeded=0; errors=[]
-    # Apply the same multi-database behavior as the main search path: search
-    # both configured collections instead of stopping after the first database
-    # fills the limit. This is important for complete season/episode and
-    # language/quality variant discovery when MULTIPLE_DB=True.
     for name,collection in (("primary",media),("secondary",media2)):
-        if collection is None: continue
+        if collection is None or len(docs)>=bounded: continue
         configured+=1
+        remaining=bounded-len(docs)
         try:
-            rows=await (collection.find(mongo_filter,_SEARCH_PROJECTION).sort("$natural",-1).limit(bounded).to_list(length=bounded))
+            rows=await (collection.find(mongo_filter,_SEARCH_PROJECTION).sort("$natural",-1).limit(remaining).to_list(length=remaining))
             succeeded+=1
             for doc in rows:
                 key=_normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
