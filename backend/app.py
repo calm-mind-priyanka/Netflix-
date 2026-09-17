@@ -51,6 +51,7 @@ from .parser import (
     parse_doc,
     search_title_score,
     stable_id,
+    _CatalogBuilder,
 )
 from .stream import Streamer, create_client
 
@@ -69,6 +70,12 @@ SEARCH_CACHE = OrderedDict()
 SEARCH_CACHE_TTL = 30
 SEARCH_CACHE_MAX = 256
 SEARCH_INFLIGHT = {}
+# Cache the complete logical title group so every Season/Episode/Language/Quality
+# click does not re-query and re-parse the same MongoDB records.
+GROUP_CACHE = OrderedDict()
+GROUP_CACHE_TTL = 120
+GROUP_CACHE_MAX = 64
+GROUP_INFLIGHT = {}
 SEARCH_SEMAPHORE = asyncio.Semaphore(3)
 SEARCH_CANDIDATE_LIMIT = min(max(80, int(os.getenv("SEARCH_CANDIDATE_LIMIT", "120"))), 300)
 HOME_CACHE = None
@@ -117,7 +124,7 @@ async def all_titles(limit=None):
 async def _tmdb_session():
     global TMDB_SESSION, TMDB_SEMAPHORE
     if TMDB_SESSION is None or TMDB_SESSION.closed:
-        TMDB_SESSION = ClientSession(timeout=ClientTimeout(total=8))
+        TMDB_SESSION = ClientSession(timeout=ClientTimeout(total=4))
     if TMDB_SEMAPHORE is None:
         TMDB_SEMAPHORE = asyncio.Semaphore(8)
     return TMDB_SESSION, TMDB_SEMAPHORE
@@ -500,29 +507,97 @@ async def _cached_or_search_items(query):
 
 
 async def _load_grouped_title(title_name, title_id=None, year_hint=None):
-    """Load the complete real variant pool for one logical title.
+    """Load one logical title group and cache it briefly in-process.
 
-    ``title_name`` is a logical identity, never a Telegram file ID.  Mongo
-    records are still the source of truth for every season/episode/variant.
+    Search discovery is intentionally bounded, but once a title is identified
+    this loader reads the title's real Mongo records and builds one grouped
+    object. The short cache is especially important on Koyeb Free because a
+    user commonly clicks several filters for the same title in succession.
     """
     name = str(title_name or "").strip()
     if not name:
         return None
 
-    docs = await search_media(name, limit=TITLE_VARIANT_LIMIT)
-    items = await asyncio.to_thread(normalize, docs)
-    if title_id:
-        return next((item for item in items if item.get("id") == title_id), None)
+    cache_key = (normalize_for_search(name), int(year_hint) if year_hint is not None else None)
+    now = time.time()
+    cached = GROUP_CACHE.get(cache_key)
+    if cached and now - cached[0] < GROUP_CACHE_TTL:
+        GROUP_CACHE.move_to_end(cache_key)
+        value = cached[1]
+        if title_id and value.get("id") != title_id:
+            return None
+        return value
+    if cached:
+        GROUP_CACHE.pop(cache_key, None)
 
-    wanted = normalize_for_search(name)
-    exact = [item for item in items if normalize_for_search(item.get("title")) == wanted]
-    if year_hint is not None:
-        year_exact = [item for item in exact if item.get("year") in (None, year_hint)]
-        if year_exact:
-            exact = year_exact
-    if exact:
-        return exact[0]
-    return next((item for item in items if search_title_score(item.get("title"), name) >= 0.90), None)
+    # Single-flight the expensive title reconstruction. Filter buttons often
+    # fire close together, and they should share one Mongo read/parse pass.
+    inflight = GROUP_INFLIGHT.get(cache_key)
+    if inflight is None:
+        async def build():
+            # Keep the Auto Filter-compatible title regex, but stream records
+            # instead of materializing a large list. This keeps memory bounded
+            # for titles with many episodes/files.
+            search_filter = build_search_filter(name)
+            if not search_filter:
+                return None
+            projection = _SEARCH_PROJECTION
+            # Build the logical catalog incrementally. We never keep the raw
+            # MongoDB documents for the entire title in memory.
+            builder = _CatalogBuilder()
+            seen = set()
+            configured = [(n, c) for n, c in (("primary", media), ("secondary", media2)) if c is not None]
+            succeeded = 0
+            errors = []
+            for db_name, collection in configured:
+                try:
+                    cursor = collection.find(search_filter, projection).sort("$natural", -1)
+                    async for doc in cursor:
+                        key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
+                        if key and key in seen:
+                            continue
+                        if key:
+                            seen.add(key)
+                        builder.add(doc)
+                    succeeded += 1
+                except Exception as exc:
+                    errors.append(f"{db_name}: {type(exc).__name__}")
+                    LOGGER.warning("%s MongoDB complete-title read failed: %s", db_name, type(exc).__name__)
+            if configured and succeeded == 0:
+                raise RuntimeError(
+                    "All configured MongoDB databases are unreachable or the collection cannot be searched ("
+                    + ", ".join(errors) + ")"
+                )
+
+            items = builder.finish()
+            wanted = normalize_for_search(name)
+            exact = [item for item in items if normalize_for_search(item.get("title")) == wanted]
+            if year_hint is not None:
+                year_exact = [item for item in exact if item.get("year") in (None, year_hint)]
+                if year_exact:
+                    exact = year_exact
+            value = exact[0] if exact else next(
+                (item for item in items if search_title_score(item.get("title"), name) >= 0.90),
+                None,
+            )
+            if value:
+                GROUP_CACHE[cache_key] = (time.time(), value)
+                GROUP_CACHE.move_to_end(cache_key)
+                while len(GROUP_CACHE) > GROUP_CACHE_MAX:
+                    GROUP_CACHE.popitem(last=False)
+            return value
+
+        inflight = asyncio.create_task(build())
+        GROUP_INFLIGHT[cache_key] = inflight
+    try:
+        value = await inflight
+    finally:
+        if GROUP_INFLIGHT.get(cache_key) is inflight:
+            GROUP_INFLIGHT.pop(cache_key, None)
+
+    if title_id and value and value.get("id") != title_id:
+        return None
+    return value
 
 
 async def title(request):
@@ -1072,7 +1147,7 @@ async def startup(app):
 
     global TMDB_SESSION, TMDB_SEMAPHORE
     if TMDB_API_KEY:
-        TMDB_SESSION, TMDB_SEMAPHORE = ClientSession(timeout=ClientTimeout(total=8)), asyncio.Semaphore(8)
+        TMDB_SESSION, TMDB_SEMAPHORE = ClientSession(timeout=ClientTimeout(total=4)), asyncio.Semaphore(8)
         LOGGER.info("TMDB metadata enrichment enabled with bounded concurrency/cache")
 
     if telegram:
