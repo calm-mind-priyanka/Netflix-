@@ -14,7 +14,7 @@ DATABASE_URI = _env("DATABASE_URI")
 DATABASE_URI2 = _env("DATABASE_URI2")
 DATABASE_NAME = _env("DATABASE_NAME", "Cluster0")
 COLLECTION_NAME = _env("COLLECTION_NAME", "Sandy_files")
-MULTIPLE_DB = _bool_env("MULTIPLE_DB", False)
+MULTIPLE_DB = _bool_env("MULTIPLE_DB", True)
 
 BOT_TOKEN = _env("BOT_TOKEN")
 try:
