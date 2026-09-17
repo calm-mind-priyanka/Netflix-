@@ -82,7 +82,9 @@ async def iter_media(query=None, projection=None, limit=None):
 
             emitted_from_collection = 0
             async for doc in cursor:
-                key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
+                # file_id is the Auto Filter identity and is more stable across
+                # separate Mongo databases than Mongo's local _id.
+                key = _normalize_id(doc.get("file_id")) or _normalize_id(doc.get("_id"))
                 if key and key in seen:
                     continue
                 if key:
@@ -232,7 +234,9 @@ async def search_media(query, limit=None):
             )
             succeeded += 1
             for doc in rows:
-                key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
+                # file_id is the Auto Filter identity and is more stable across
+                # separate Mongo databases than Mongo's local _id.
+                key = _normalize_id(doc.get("file_id")) or _normalize_id(doc.get("_id"))
                 if key and key in seen:
                     continue
                 if key:
