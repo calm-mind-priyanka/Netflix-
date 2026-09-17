@@ -580,17 +580,18 @@ def _best_file(variants):
 
 
 async def filter_options(request):
-    """Return controls from the real files belonging to one title.
+    """Return controls from the complete real media group.
 
-    The endpoint remains for compatibility with older clients, but it is fully
-    data-driven: seasons and episodes come from MongoDB records and no season
-    ceiling is baked into the response.
+    Prefer the logical title id supplied by the Netflix UI.  This avoids
+    re-interpreting a displayed title string (which may contain punctuation,
+    numbers or release wording) when a filter button is clicked.
     """
     title_name=request.query.get("title","").strip()
-    if not title_name:
-        raise web.HTTPBadRequest(text="A title is required")
+    title_id=request.query.get("id","").strip() or None
+    if not title_name and not title_id:
+        raise web.HTTPBadRequest(text="A title or title id is required")
 
-    target=await _load_grouped_title(title_name, None)
+    target=await _load_grouped_title(title_name, title_id) if title_name else None
     if not target:
         raise web.HTTPNotFound(text="Title not found")
 
@@ -645,56 +646,103 @@ async def filter_options(request):
 
 
 async def filter_media(request):
-    """Apply cumulative filters to the ORIGINAL raw Auto Filter result set.
+    """Filter the complete logical title group using real parsed assets.
 
-    The query is reduced to its title/year portion first. Season, episode,
-    language and quality are then independent Mongo constraints ANDed onto the
-    same raw file search. This avoids the S04 E07 token-spacing problem and,
-    importantly, never collapses multiple valid files into one.
+    Auto Filter's Mongo regex is used to locate a title, but once the Netflix
+    UI has a logical title id we do NOT issue a second Mongo regex for every
+    button click.  We load the already-grouped title and apply season, episode,
+    language, quality and subtitle constraints to its actual asset records.
+    This is important for names such as ``New Biggboss Day 1`` and prevents
+    title-string differences from causing a false backend failure.
     """
     query=request.query.get("q","").strip() or request.query.get("title","").strip()
-    if not query:
-        raise web.HTTPBadRequest(text="A search query is required")
+    title_id=request.query.get("id","").strip() or None
+    if not query and not title_id:
+        raise web.HTTPBadRequest(text="A search query or title id is required")
+
     try:
-        season=int(request.query["season"]) if request.query.get("season","").isdigit() else None
-        episode=int(request.query["episode"]) if request.query.get("episode","").isdigit() else None
+        season=int(request.query["season"]) if request.query.get("season","").strip().isdigit() else None
+        episode=int(request.query["episode"]) if request.query.get("episode","").strip().isdigit() else None
     except ValueError as exc:
         raise web.HTTPBadRequest(text="Invalid season or episode") from exc
+
     language=request.query.get("language","").strip() or None
     quality=request.query.get("quality","").strip() or None
     subtitle=request.query.get("subtitle","").strip() or None
 
-    prepared=_autofilter_prepare_query(query)
-    parsed=normalize_query(prepared)
-    base_title=parsed.get("title") or prepared
-    base_parts=[base_title]
-    if parsed.get("year") is not None:
-        base_parts.append(str(parsed["year"]))
-    base_query=" ".join(base_parts)
+    # The title id is authoritative for an already-open detail page.  Fall
+    # back to the query only for older clients that do not send it.
+    target=None
+    if title_id and query:
+        parsed_query=normalize_query(_autofilter_prepare_query(query))
+        target=await _load_grouped_title(
+            query, title_id, year_hint=parsed_query.get("year")
+        )
+    elif query:
+        prepared=_autofilter_prepare_query(query)
+        parsed_query=normalize_query(prepared)
+        target=await _load_grouped_title(
+            parsed_query.get("title") or prepared,
+            None,
+            year_hint=parsed_query.get("year"),
+        )
 
-    files=await search_media_with_filters(
-        base_query,
-        season=season,
-        episode=episode,
-        language=language,
-        quality=quality,
-        subtitle=subtitle,
-        limit=SEARCH_MAX_DOCS,
-    )
-    files=await asyncio.to_thread(_parsed_files, files)
-    files.sort(key=_file_sort_key,reverse=True)
+    if not target:
+        return web.json_response({
+            "ok": False, "count": 0, "file": None, "matches": [],
+            "error": "TITLE GROUP NOT FOUND",
+        }, status=200)
 
-    # Keep every matching raw file. Player.open receives the whole matching
-    # pool so one file is not required before Play becomes available.
+    # Flatten only the real assets that belong to this logical title.  There is
+    # no Cartesian-product generation here: every returned option is an actual
+    # MongoDB/Telegram file record.
+    if target.get("type") == "series":
+        all_files=[
+            variant
+            for season_item in (target.get("seasons") or [])
+            for episode_item in (season_item.get("episodes") or [])
+            for variant in (episode_item.get("variants") or [])
+        ]
+    else:
+        all_files=list(target.get("variants") or [])
+
+    wanted={
+        "year": int(request.query["year"]) if request.query.get("year","").strip().isdigit() else target.get("year"),
+        "season": season,
+        "episode": episode,
+        "quality": quality,
+        "source": request.query.get("source","").strip() or None,
+        "language": language,
+    }
+
+    matches=[]
+    seen=set()
+    for item in all_files:
+        if not item or not item.get("file_id"):
+            continue
+        file_id=str(item.get("file_id"))
+        if file_id in seen:
+            continue
+        if not _variant_matches_request(item, wanted):
+            continue
+        if subtitle and subtitle.casefold() not in {
+            str(x).casefold() for x in (item.get("subtitle_languages") or [])
+        }:
+            continue
+        seen.add(file_id)
+        matches.append(item)
+
+    matches.sort(key=_file_sort_key, reverse=True)
     return web.json_response({
-        "ok":bool(files),
-        "count":len(files),
-        "file":files[0] if files else None,
-        "matches":files[:100],
-        "query":base_query,
-        "exact":len(files)==1,
-        "error":None if files else "NO FILES WERE FOUND",
-    },status=200)
+        "ok": bool(matches),
+        "count": len(matches),
+        "file": matches[0] if matches else None,
+        "matches": matches[:100],
+        "query": target.get("title") or query,
+        "title_id": target.get("id"),
+        "exact": len(matches)==1,
+        "error": None if matches else "NO MATCHING FILES FOUND",
+    }, status=200)
 
 async def resolve(request):
     """Resolve one real Telegram file using independent metadata matching."""
