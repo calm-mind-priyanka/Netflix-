@@ -43,6 +43,7 @@ from .database import (
     fuzzy_search_media,
     search_media_with_filters,
     build_search_filter,
+    _SEARCH_PROJECTION,
     media,
     media2,
 )
