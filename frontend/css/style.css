@@ -104,3 +104,32 @@ main{padding-bottom:calc(78px + env(safe-area-inset-bottom))}
 }
 .afChoice:disabled{opacity:.35;cursor:not-allowed;transform:none;background:#1a1a1a}
 .afChoice:disabled:hover{background:#1a1a1a;transform:none}
+
+/* Auto Filter controls are intentionally red so users can immediately see
+   that Season/Episode/Language/Quality/Caption choices are clickable. */
+.afChoice{
+  background:#4a0b10;
+  border:1px solid #e50914;
+  color:#fff;
+  font-weight:750;
+  box-shadow:0 0 0 1px rgba(229,9,20,.12) inset;
+}
+.afChoice:hover{
+  background:#e50914;
+  color:#fff;
+  transform:translateY(-1px);
+  box-shadow:0 6px 18px rgba(229,9,20,.22);
+}
+.afChoice.active{
+  background:#e50914;
+  color:#fff;
+  font-weight:900;
+  outline:2px solid #ff5960;
+  box-shadow:0 0 0 2px rgba(229,9,20,.18),0 6px 18px rgba(229,9,20,.18);
+}
+.search-selected-season{
+  border:1px solid rgba(229,9,20,.45);
+  border-radius:10px;
+  padding:10px 12px;
+  background:rgba(229,9,20,.06);
+}
