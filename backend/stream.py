@@ -18,7 +18,18 @@ from pyrogram.errors import AuthBytesInvalid
 from pyrogram.file_id import FileId, FileType, ThumbnailSource
 from pyrogram.session import Session, Auth
 
-from .config import API_ID, API_HASH, BOT_TOKEN, SESSION_NAME, TRANSCODE_CONCURRENCY, STREAM_CONCURRENCY, STREAM_CHUNK_TIMEOUT
+from . import config as _config
+
+# Keep streaming startup compatible with older config.py files.  The stream
+# module must not fail to import just because a newly-added tuning variable is
+# absent; config.py supplies safe defaults when available.
+API_ID = getattr(_config, "API_ID", 0)
+API_HASH = getattr(_config, "API_HASH", "")
+BOT_TOKEN = getattr(_config, "BOT_TOKEN", "")
+SESSION_NAME = getattr(_config, "SESSION_NAME", "movie_site")
+TRANSCODE_CONCURRENCY = getattr(_config, "TRANSCODE_CONCURRENCY", 1)
+STREAM_CONCURRENCY = getattr(_config, "STREAM_CONCURRENCY", 4)
+STREAM_CHUNK_TIMEOUT = getattr(_config, "STREAM_CHUNK_TIMEOUT", 45)
 from .database import find_media
 
 LOGGER = logging.getLogger("streambox.stream")
