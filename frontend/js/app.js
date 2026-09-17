@@ -575,12 +575,26 @@ async function doSearch(){
     state($("#results"),`Search failed: ${error.message||"backend error"}`,"error");
     lastSubmittedQuery="";
   }finally{
-    searchInFlight=false;
+    if(sequence===searchSequence){
+      searchInFlight=false;
+    }
+
+    // A completed/aborted request must never leave the visible search panel
+    // stuck on “Searching…”. Successful searches open the details panel;
+    // reopening search with an empty box resets the result state in openSearch().
   }
 }
 
 function openSearch(){
   $("#search").classList.remove("hidden");
+
+  // Never show a stale loading state from a previous completed search.
+  // The search panel can be reopened after the title/details view, so reset
+  // the result area when there is no active query.
+  if(!$("#query").value.trim() && !searchInFlight){
+    state($("#results"),"Type a movie or series name.");
+  }
+
   $("#query").focus();
 }
 
