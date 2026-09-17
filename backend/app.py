@@ -44,6 +44,7 @@ from .database import (
     search_media_with_filters,
     build_search_filter,
     _SEARCH_PROJECTION,
+    _normalize_id,
     media,
     media2,
 )
