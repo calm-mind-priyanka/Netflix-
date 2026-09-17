@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -193,57 +194,48 @@ _SEARCH_PROJECTION = {
 
 
 async def search_media(query, limit=None):
-    """Fast, read-only Auto Filter style search.
-
-    The hot path is deliberately: regex -> Mongo -> small projection ->
-    bounded result list.  No count_documents(), no full collection scan in
-    Python, and no Telegram/TMDB calls happen here.
-    """
+    """Fast, read-only Auto Filter style search across every configured DB."""
     search_filter = build_search_filter(query)
     if not search_filter:
         return []
-
     bounded = 120 if limit is None else max(1, min(int(limit), 1500))
-    docs = []
-    seen = set()
-    configured = 0
-    succeeded = 0
-    errors = []
+    projection = _SEARCH_PROJECTION
 
-    # Match Auto Filter's newest-first behavior.  We intentionally fetch a
-    # small primary window first and only touch the secondary DB when the
-    # primary cannot fill that window.
-    for name, collection in (("primary", media), ("secondary", media2)):
-        if collection is None or len(docs) >= bounded:
-            continue
-        configured += 1
-        remaining = bounded - len(docs)
+    async def fetch(name, collection):
+        if collection is None:
+            return name, [], None
         try:
-            rows = await (
-                collection.find(search_filter, _SEARCH_PROJECTION)
-                .sort("$natural", -1)
-                .limit(remaining)
-                .to_list(length=remaining)
-            )
-            succeeded += 1
-            for doc in rows:
-                key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
-                if key and key in seen:
-                    continue
-                if key:
-                    seen.add(key)
-                docs.append(doc)
+            rows = await (collection.find(search_filter, projection)
+                          .sort("$natural", -1).limit(bounded)
+                          .to_list(length=bounded))
+            return name, rows, None
         except Exception as exc:
-            errors.append(f"{name}: {type(exc).__name__}")
-            LOGGER.warning("%s MongoDB search failed: %s", name, type(exc).__name__)
+            return name, [], exc
 
-    if configured == 0:
+    configured = [(n, c) for n, c in (("primary", media), ("secondary", media2)) if c is not None]
+    if not configured:
         raise RuntimeError("No MongoDB database is configured")
+    results = await asyncio.gather(*(fetch(n, c) for n, c in configured))
+    docs, succeeded, errors, seen = [], 0, [], set()
+    for name, rows, error in results:
+        if error is not None:
+            errors.append(f"{name}: {type(error).__name__}")
+            LOGGER.warning("%s MongoDB search failed: %s", name, type(error).__name__)
+            continue
+        succeeded += 1
+        for doc in rows:
+            key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            docs.append(doc)
+            if len(docs) >= bounded:
+                break
+        if len(docs) >= bounded:
+            break
     if succeeded == 0:
-        raise RuntimeError(
-            "All configured MongoDB databases are unreachable or the collection "
-            "cannot be searched (" + ", ".join(errors) + ")"
-        )
+        raise RuntimeError("All configured MongoDB databases are unreachable or the collection cannot be searched (" + ", ".join(errors) + ")")
     return docs
 
 async def fuzzy_search_media(query, limit=80):
@@ -317,40 +309,67 @@ def _episode_constraint(episode):
         rf"e(?:p(?:isode)?)?\s*0*{n}|episode\s*0*{n}|\d+\s*x\s*0*{n})(?:\b|[\.\+\-_])"
     )
 
-async def search_media_with_filters(query, *, season=None, episode=None, language=None, quality=None, limit=1500):
-    """Search the same raw Mongo records and cumulatively apply Auto Filter facets."""
-    base=build_search_filter(str(query or "").strip())
+async def search_media_with_filters(query, *, season=None, episode=None,
+                                    language=None, quality=None, subtitle=None, limit=1500):
+    """Apply cumulative constraints to the same real Auto Filter records."""
+    base = build_search_filter(str(query or "").strip())
     if not base:
         return []
-    constraints=[base]
-    if season is not None: constraints.append(_season_constraint(season))
-    if episode is not None: constraints.append(_episode_constraint(episode))
+    constraints = [base]
+    if season is not None:
+        constraints.append(_season_constraint(season))
+    if episode is not None:
+        constraints.append(_episode_constraint(episode))
     if language:
-        token=r"(?:\b|[\.\+\-_])"+re.escape(str(language).strip())+r"(?:\b|[\.\+\-_])"
+        token = r"(?:\b|[\.\+\-_])" + re.escape(str(language).strip()) + r"(?:\b|[\.\+\-_])"
         constraints.append(_raw_field_constraint(token))
     if quality:
-        q=str(quality).strip()
-        q_token=q[:-1] if q.lower().endswith("p") else q
-        token=r"(?:\b|[\.\+\-_])"+re.escape(q_token)+r"p?(?:\b|[\.\+\-_])"
+        q = str(quality).strip()
+        q_token = q[:-1] if q.lower().endswith("p") else q
+        token = r"(?:\b|[\.\+\-_])" + re.escape(q_token) + r"p?(?:\b|[\.\+\-_])"
         constraints.append(_raw_field_constraint(token))
-    mongo_filter=constraints[0] if len(constraints)==1 else {"$and":constraints}
-    bounded=max(1,min(int(limit),1500))
-    docs=[]; seen=set(); configured=0; succeeded=0; errors=[]
-    for name,collection in (("primary",media),("secondary",media2)):
-        if collection is None or len(docs)>=bounded: continue
-        configured+=1
-        remaining=bounded-len(docs)
+    if subtitle:
+        token = r"(?<!\w)" + re.escape(str(subtitle).strip()) + r"(?!\w)"
+        constraints.append({"caption": {"$regex": token, "$options": "i"}})
+
+    mongo_filter = constraints[0] if len(constraints) == 1 else {"$and": constraints}
+    bounded = max(1, min(int(limit), 1500))
+    projection = _SEARCH_PROJECTION
+
+    async def fetch(name, collection):
+        if collection is None:
+            return name, [], None
         try:
-            rows=await (collection.find(mongo_filter,_SEARCH_PROJECTION).sort("$natural",-1).limit(remaining).to_list(length=remaining))
-            succeeded+=1
-            for doc in rows:
-                key=_normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
-                if key and key in seen: continue
-                if key: seen.add(key)
-                docs.append(doc)
+            rows = await (collection.find(mongo_filter, projection)
+                          .sort("$natural", -1).limit(bounded)
+                          .to_list(length=bounded))
+            return name, rows, None
         except Exception as exc:
-            errors.append(f"{name}: {type(exc).__name__}")
-            LOGGER.warning("%s MongoDB filtered search failed: %s",name,type(exc).__name__)
-    if configured==0: raise RuntimeError("No MongoDB database is configured")
-    if succeeded==0: raise RuntimeError("All configured MongoDB databases are unreachable or the collection cannot be searched ("+", ".join(errors)+")")
+            return name, [], exc
+
+    configured = [(n, c) for n, c in (("primary", media), ("secondary", media2)) if c is not None]
+    if not configured:
+        raise RuntimeError("No MongoDB database is configured")
+    results = await asyncio.gather(*(fetch(n, c) for n, c in configured))
+    docs, succeeded, errors, seen = [], 0, [], set()
+    for name, rows, error in results:
+        if error is not None:
+            errors.append(f"{name}: {type(error).__name__}")
+            LOGGER.warning("%s MongoDB filtered search failed: %s", name, type(error).__name__)
+            continue
+        succeeded += 1
+        for doc in rows:
+            key = _normalize_id(doc.get("_id")) or _normalize_id(doc.get("file_id"))
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            docs.append(doc)
+            if len(docs) >= bounded:
+                break
+        if len(docs) >= bounded:
+            break
+    if succeeded == 0:
+        raise RuntimeError("All configured MongoDB databases are unreachable or the collection cannot be searched (" + ", ".join(errors) + ")")
     return docs
+
