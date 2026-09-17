@@ -18,7 +18,7 @@ from pyrogram.errors import AuthBytesInvalid
 from pyrogram.file_id import FileId, FileType, ThumbnailSource
 from pyrogram.session import Session, Auth
 
-from .config import API_ID, API_HASH, BOT_TOKEN, SESSION_NAME, TRANSCODE_CONCURRENCY
+from .config import API_ID, API_HASH, BOT_TOKEN, SESSION_NAME, TRANSCODE_CONCURRENCY, STREAM_CONCURRENCY, STREAM_CHUNK_TIMEOUT
 from .database import find_media
 
 LOGGER = logging.getLogger("streambox.stream")
@@ -104,6 +104,10 @@ class Streamer:
         self.track_cache = OrderedDict()
         self.track_cache_max = 96
         self.track_slots = asyncio.Semaphore(1)
+        # Limit active Telegram media transfers. Each active request holds a
+        # bounded chunk buffer; without a cap, a traffic spike can multiply
+        # memory, sockets and Telegram work on a small Koyeb instance.
+        self.stream_slots = asyncio.Semaphore(STREAM_CONCURRENCY)
 
     async def properties(self, file_id):
         key = str(file_id)
@@ -144,49 +148,55 @@ class Streamer:
         if file_id.dc_id in sessions:
             return sessions[file_id.dc_id]
 
-        if file_id.dc_id != await self.client.storage.dc_id():
-            session = Session(
-                self.client,
-                file_id.dc_id,
-                await Auth(
+        # Two simultaneous first requests for the same Telegram DC must not
+        # both create/export a media session.
+        async with self.lock:
+            if file_id.dc_id in sessions:
+                return sessions[file_id.dc_id]
+
+            if file_id.dc_id != await self.client.storage.dc_id():
+                session = Session(
                     self.client,
                     file_id.dc_id,
+                    await Auth(
+                        self.client,
+                        file_id.dc_id,
+                        await self.client.storage.test_mode(),
+                    ).create(),
                     await self.client.storage.test_mode(),
-                ).create(),
-                await self.client.storage.test_mode(),
-                is_media=True,
-            )
-            await session.start()
-
-            for _ in range(6):
-                exported = await self.client.invoke(
-                    raw.functions.auth.ExportAuthorization(dc_id=file_id.dc_id)
+                    is_media=True,
                 )
-                try:
-                    await session.send(
-                        raw.functions.auth.ImportAuthorization(
-                            id=exported.id,
-                            bytes=exported.bytes,
-                        )
-                    )
-                    break
-                except AuthBytesInvalid:
-                    continue
-            else:
-                await session.stop()
-                raise AuthBytesInvalid("Unable to import Telegram DC authorization")
-        else:
-            session = Session(
-                self.client,
-                file_id.dc_id,
-                await self.client.storage.auth_key(),
-                await self.client.storage.test_mode(),
-                is_media=True,
-            )
-            await session.start()
+                await session.start()
 
-        sessions[file_id.dc_id] = session
-        return session
+                for _ in range(6):
+                    exported = await self.client.invoke(
+                        raw.functions.auth.ExportAuthorization(dc_id=file_id.dc_id)
+                    )
+                    try:
+                        await session.send(
+                            raw.functions.auth.ImportAuthorization(
+                                id=exported.id,
+                                bytes=exported.bytes,
+                            )
+                        )
+                        break
+                    except AuthBytesInvalid:
+                        continue
+                else:
+                    await session.stop()
+                    raise AuthBytesInvalid("Unable to import Telegram DC authorization")
+            else:
+                session = Session(
+                    self.client,
+                    file_id.dc_id,
+                    await self.client.storage.auth_key(),
+                    await self.client.storage.test_mode(),
+                    is_media=True,
+                )
+                await session.start()
+
+            sessions[file_id.dc_id] = session
+            return session
 
     @staticmethod
     def location(file_id):
@@ -236,12 +246,15 @@ class Streamer:
         location = self.location(properties)
 
         while True:
-            result = await session.send(
-                raw.functions.upload.GetFile(
-                    location=location,
-                    offset=offset,
-                    limit=CHUNK_SIZE,
-                )
+            result = await asyncio.wait_for(
+                session.send(
+                    raw.functions.upload.GetFile(
+                        location=location,
+                        offset=offset,
+                        limit=CHUNK_SIZE,
+                    )
+                ),
+                timeout=STREAM_CHUNK_TIMEOUT,
             )
             if not isinstance(result, raw.types.upload.File):
                 raise RuntimeError(
@@ -392,7 +405,12 @@ class Streamer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            data = await asyncio.wait_for(process.stdout.read(), timeout=45)
+            data = await asyncio.wait_for(process.stdout.read(8 * 1024 * 1024 + 1), timeout=45)
+            if len(data) > 8 * 1024 * 1024:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
+                raise web.HTTPRequestEntityTooLarge(max_size=8 * 1024 * 1024, actual_size=len(data))
             code = await process.wait()
             if code != 0 or not data:
                 raise web.HTTPBadRequest(text="This subtitle track could not be converted for the browser")
@@ -558,18 +576,28 @@ class Streamer:
         session = await self.media_session(properties)
         location = self.location(properties)
 
+        try:
+            await asyncio.wait_for(self.stream_slots.acquire(), timeout=10)
+        except asyncio.TimeoutError as exc:
+            raise web.HTTPServiceUnavailable(
+                text="Streaming capacity is busy. Please try again shortly."
+            ) from exc
+
         async def write_body(response):
             current_part = 1
             current_offset = offset
             remaining = total
 
             while current_part <= part_count and remaining > 0:
-                result = await session.send(
-                    raw.functions.upload.GetFile(
-                        location=location,
-                        offset=current_offset,
-                        limit=CHUNK_SIZE,
-                    )
+                result = await asyncio.wait_for(
+                    session.send(
+                        raw.functions.upload.GetFile(
+                            location=location,
+                            offset=current_offset,
+                            limit=CHUNK_SIZE,
+                        )
+                    ),
+                    timeout=STREAM_CHUNK_TIMEOUT,
                 )
 
                 if not isinstance(result, raw.types.upload.File):
@@ -616,11 +644,11 @@ class Streamer:
         if partial:
             response.headers["Content-Range"] = f"bytes {start}-{end}/{size}"
 
-        await response.prepare(request)
         try:
+            await response.prepare(request)
             await write_body(response)
-        except (ConnectionError, ConnectionResetError, BrokenPipeError, ClientConnectionError, asyncio.CancelledError):
-            LOGGER.info("Client disconnected while streaming file %s", file_id)
+        except (ConnectionError, ConnectionResetError, BrokenPipeError, ClientConnectionError, asyncio.CancelledError, asyncio.TimeoutError):
+            LOGGER.info("Streaming ended early for file %s", file_id)
             return response
         except Exception:
             LOGGER.exception("Telegram streaming failed for file %s", file_id)
@@ -633,6 +661,7 @@ class Streamer:
                 await response.write_eof()
             except (ConnectionResetError, BrokenPipeError, ClientConnectionError, asyncio.CancelledError):
                 pass
+            self.stream_slots.release()
 
         return response
 
