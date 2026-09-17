@@ -217,9 +217,7 @@ async function renderAutoFilter(title, mount, initialSeason=null, initialEpisode
       ...(v.languages||[])
     ]).filter(Boolean).map(String)
   )].sort((a,b)=>a.localeCompare(b));
-  const languages=actualLanguages.length
-    ?actualLanguages
-    :["Malayalam","Tamil","English","Hindi","Telugu","Kannada","Gujarati","Marathi","Punjabi"];
+  const languages=actualLanguages;
 
   const actualQualities=[...new Set(
     variants.map(v=>String(v.quality||"").trim()).filter(v=>v&&v.toLowerCase()!=="auto")
@@ -227,9 +225,7 @@ async function renderAutoFilter(title, mount, initialSeason=null, initialEpisode
     const an=parseInt(a,10)||0, bn=parseInt(b,10)||0;
     return an-bn||a.localeCompare(b);
   });
-  const qualities=actualQualities.length
-    ?actualQualities
-    :["360P","480P","720P","1080P","1440P","2160P"];
+  const qualities=actualQualities;
 
   const episodesForSeason=seasonNumber=>{
     const season=(title.seasons||[]).find(item=>Number(item.season)===Number(seasonNumber));
@@ -237,7 +233,29 @@ async function renderAutoFilter(title, mount, initialSeason=null, initialEpisode
       .filter(Number.isFinite).sort((a,b)=>a-b);
   };
 
-  const button=(kind,value,label=value,active=false)=>`<button type="button" class="afChoice${active?" active":""}" data-af-kind="${esc(kind)}" data-af-value="${esc(value)}">${esc(label)}</button>`;
+  const matchesVariant=(variant, ignoreKind=null)=>{
+    if(ignoreKind!=="season" && state.season!=null && Number(variant.season)!==Number(state.season)) return false;
+    if(ignoreKind!=="episode" && state.episode!=null && Number(variant.episode)!==Number(state.episode)) return false;
+    if(ignoreKind!=="language" && state.language){
+      const langs=[...(variant.audio_languages||[]),...(variant.languages||[])].map(v=>String(v).toLowerCase());
+      if(!langs.includes(String(state.language).toLowerCase())) return false;
+    }
+    if(ignoreKind!=="quality" && state.quality){
+      const a=String(variant.quality||"").replace(/\s/g,"").toLowerCase().replace(/p$/i,"");
+      const b=String(state.quality).replace(/\s/g,"").toLowerCase().replace(/p$/i,"");
+      if(a!==b) return false;
+    }
+    return true;
+  };
+  const valuesFor=(kind)=>{
+    const source=variants.filter(v=>matchesVariant(v,kind));
+    if(kind==="season") return [...new Set(source.map(v=>Number(v.season)).filter(Number.isFinite))].sort((a,b)=>a-b);
+    if(kind==="episode") return [...new Set(source.map(v=>Number(v.episode)).filter(Number.isFinite))].sort((a,b)=>a-b);
+    if(kind==="language") return [...new Set(source.flatMap(v=>[...(v.audio_languages||[]),...(v.languages||[])].filter(Boolean).map(String)))].sort((a,b)=>a.localeCompare(b));
+    if(kind==="quality") return [...new Set(source.map(v=>String(v.quality||"").trim()).filter(v=>v && v.toLowerCase()!=="auto"))].sort((a,b)=>(parseInt(a,10)||0)-(parseInt(b,10)||0)||a.localeCompare(b));
+    return [];
+  };
+  const button=(kind,value,label=value,active=false,disabled=false)=>`<button type="button" class="afChoice${active?" active":""}" data-af-kind="${esc(kind)}" data-af-value="${esc(value)}"${disabled?" disabled":""}>${esc(label)}</button>`;
   const selectedLabel=()=>[
     state.season!=null?`Season ${state.season}`:null,
     state.episode!=null?`Episode ${String(state.episode).padStart(2,"0")}`:null,
@@ -246,7 +264,12 @@ async function renderAutoFilter(title, mount, initialSeason=null, initialEpisode
   ].filter(Boolean).join(" • ") || "Select an option";
 
   function draw(statusText="",statusKind="idle"){
-    const episodes=state.season!=null?episodesForSeason(state.season):[];
+    const seasonsForState=valuesFor("season");
+    const episodes=state.season!=null?valuesFor("episode"):[];
+    const visibleLanguages=valuesFor("language");
+    const visibleQualities=valuesFor("quality");
+    const normalVisibleSeasons=seasonsForState.filter(value=>value>=1&&value<=15);
+    const extendedVisibleSeasons=seasonsForState.filter(value=>value>15);
     const extendedSelected=state.season!=null && state.season>15;
     mount.innerHTML=`<section class="variantChoices autoFilterPanel">
       <div class="afHeader">
@@ -259,11 +282,11 @@ async function renderAutoFilter(title, mount, initialSeason=null, initialEpisode
 
       ${title.type==="series" ? `<div class="afGroup"><small>Season</small>
         <div class="afChoices">
-          ${normalSeasons.map(v=>button("season",v,`Season ${v}`,state.season===v)).join("")}
-          ${extendedSeasons.length?button("more","extended","AUTO / MORE",extendedSelected):""}
+          ${normalVisibleSeasons.map(v=>button("season",v,`Season ${v}`,state.season===v)).join("")}
+          ${extendedVisibleSeasons.length?button("more","extended","AUTO / MORE",extendedSelected):""}
         </div>
         ${extendedSelected?`<div class="afChoices afExtended">
-          ${extendedSeasons.map(v=>button("season",v,`Season ${v}`,state.season===v)).join("")}
+          ${extendedVisibleSeasons.map(v=>button("season",v,`Season ${v}`,state.season===v)).join("")}
         </div>`:""}
       </div>`:""}
 
@@ -275,11 +298,11 @@ async function renderAutoFilter(title, mount, initialSeason=null, initialEpisode
       </div>`:""}
 
       <div class="afGroup"><small>Language</small><div class="afChoices">
-        ${languages.map(v=>button("language",v,v,state.language===v)).join("")}
+        ${visibleLanguages.map(v=>button("language",v,v,state.language===v)).join("")||"<span class='afEmpty'>No language matches this selection.</span>"}
       </div></div>
 
       <div class="afGroup"><small>Quality</small><div class="afChoices">
-        ${qualities.map(v=>button("quality",v,v,state.quality===v)).join("")}
+        ${visibleQualities.map(v=>button("quality",v,v,state.quality===v)).join("")||"<span class='afEmpty'>No quality matches this selection.</span>"}
       </div></div>
 
       <div id="afResult" class="afResult"></div>
@@ -289,8 +312,8 @@ async function renderAutoFilter(title, mount, initialSeason=null, initialEpisode
       const kind=btn.dataset.afKind, value=btn.dataset.afValue;
 
       if(kind==="more"){
-        if(!extendedSeasons.length)return;
-        if(state.season==null || state.season<=15) state.season=extendedSeasons[0];
+        if(!extendedVisibleSeasons.length)return;
+        if(state.season==null || state.season<=15) state.season=extendedVisibleSeasons[0];
         state.episode=null;
         draw("Select an actual extended season","ready");
         return;
@@ -397,9 +420,11 @@ async function showDetails(id,preferredSeason=null,preferredEpisode=null,preferr
     let title=localTitle;
     if(localTitle?.title){
       try{
+        const queryParams=new URLSearchParams({q:localTitle.title});
+        if(localTitle.year!=null) queryParams.set("year",String(localTitle.year));
         const expanded=await API.get(
           "/api/title/"+encodeURIComponent(id)+
-          "?q="+encodeURIComponent(localTitle.title)
+          "?"+queryParams.toString()
         );
         if(expanded?.id===id || expanded?.title) title=expanded;
       }catch(_){
