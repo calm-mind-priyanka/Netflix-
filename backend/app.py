@@ -350,15 +350,13 @@ async def _raw_autofilter_files(query, limit=None):
 
 
 async def _search_uncached(query):
-    """Find the logical Netflix title while keeping Ultron raw files authoritative.
+    """Resolve a query to logical title groups, then load the complete group.
 
-    The search entry point uses the title portion of the query (for example,
-    ``Reacher`` from ``Reacher S04E07``) to locate real Mongo records. Season
-    and episode are parsed separately and are passed to the existing Netflix
-    detail/Auto Filter UI. This is important because the raw release token is
-    commonly stored as ``S04E07`` without a separator; searching the literal
-    tokens ``S04`` + ``E07`` as separate Mongo terms can therefore miss valid
-    files. No raw files are discarded from the database search used by filters.
+    Auto Filter is used only to locate real stored records.  Season/episode
+    tokens are search context, not part of the logical title identity.  Once a
+    real title is identified, the complete title pool is loaded so an episode
+    query such as ``Reacher S04E07`` still opens all real Reacher seasons and
+    episodes.
     """
     prepared_query = _autofilter_prepare_query(query)
     if not prepared_query:
@@ -379,60 +377,68 @@ async def _search_uncached(query):
             fuzzy_docs = await fuzzy_search_media(search_title, limit=min(40, SEARCH_CANDIDATE_LIMIT))
             if fuzzy_docs:
                 fuzzy_parsed = parse_doc(fuzzy_docs[0])
-                docs = await search_media(fuzzy_parsed.get("title") or search_title, limit=SEARCH_CANDIDATE_LIMIT)
+                corrected_title = fuzzy_parsed.get("title") or search_title
+                docs = await search_media(corrected_title, limit=SEARCH_CANDIDATE_LIMIT)
 
     raw_items = await asyncio.to_thread(_parsed_files, docs)
     if not raw_items:
         return []
 
-    # When S/E was supplied, prefer a real raw file from that season/episode
-    # when choosing the title card. We do NOT throw away the other files; the
-    # detail page reloads the full title pool and /api/filter searches the raw
-    # Mongo collection again with cumulative constraints.
-    if parsed.get("season") is not None or parsed.get("episode") is not None:
-        matching = [
-            item for item in raw_items
-            if (parsed.get("season") is None or item.get("season") == parsed.get("season"))
-            and (parsed.get("episode") is None or item.get("episode") == parsed.get("episode"))
-        ]
-        if matching:
-            raw_items = matching + [item for item in raw_items if item not in matching]
-
-    # Group only the SEARCH PRESENTATION by logical title. The underlying
-    # Mongo records remain individual raw files and are never collapsed for
-    # Auto Filter/playback.
-    grouped = {}
+    # Score logical identities, not individual files.  An exact title wins over
+    # a longer title such as "Toxic Love", while still allowing fuzzy fallback.
+    groups = {}
     for item in raw_items:
         title = str(item.get("title") or "Untitled").strip()
-        kind = str(item.get("type") or "movie")
+        kind = str(item.get("type") or "movie").casefold()
         year = item.get("year")
         key = (normalize_for_search(title), kind, year)
-        if key not in grouped:
-            copy = dict(item)
-            copy["id"] = f"file:{copy.get('file_id') or len(grouped)}"
-            copy["raw_match_count"] = 0
-            grouped[key] = copy
-        grouped[key]["raw_match_count"] += 1
+        groups.setdefault(key, {
+            "title": title, "type": kind, "year": year,
+            "count": 0, "season": item.get("season"), "episode": item.get("episode")
+        })
+        groups[key]["count"] += 1
 
-    selected = list(grouped.values())
-    selected.sort(
-        key=lambda item: (
-            0 if (parsed.get("season") is None or item.get("season") == parsed.get("season"))
-            and (parsed.get("episode") is None or item.get("episode") == parsed.get("episode")) else 1,
-            -int(item.get("raw_match_count") or 0),
-            str(item.get("title") or "").casefold(),
-        )
-    )
+    ranked = []
+    for group in groups.values():
+        score = search_title_score(group["title"], search_title)
+        # When a year was explicitly requested, don't silently prefer a
+        # different known release year.
+        if parsed.get("year") is not None and group.get("year") not in (None, parsed["year"]):
+            score -= 0.20
+        ranked.append((score, group))
+    ranked.sort(key=lambda pair: (-pair[0], -pair[1]["count"], pair[1]["title"].casefold()))
 
-    if TMDB_API_KEY and selected:
-        values = await asyncio.gather(
-            *(enrich(item) for item in selected[:SEARCH_ENRICH_LIMIT]),
-            return_exceptions=True,
+    if not ranked or ranked[0][0] < 0.72:
+        return []
+
+    # If an exact logical title exists, suppress broader title matches. This is
+    # the important distinction between "Toxic" and "Toxic Love", for example.
+    exact = [pair for pair in ranked if normalize_for_search(pair[1]["title"]) == normalize_for_search(search_title)]
+    chosen = exact[0][1] if exact else ranked[0][1]
+
+    # Load the complete real group, not the small search candidate window.
+    async with SEARCH_SEMAPHORE:
+        full = await _load_grouped_title(
+            chosen["title"],
+            None,
+            year_hint=parsed.get("year") if parsed.get("year") is not None else chosen.get("year"),
         )
-        for i, value in enumerate(values):
-            if not isinstance(value, Exception):
-                selected[i] = value
-    return selected
+    if not full:
+        return []
+
+    # Keep query context only as selection state. It never removes seasons or
+    # episodes from the returned logical title.
+    full["search_season"] = parsed.get("season")
+    full["search_episode"] = parsed.get("episode")
+    full["search_language"] = parsed.get("language")
+    full["search_quality"] = parsed.get("quality")
+
+    if TMDB_API_KEY:
+        try:
+            full = await enrich(full)
+        except Exception:
+            LOGGER.debug("TMDB enrichment failed for search result", exc_info=True)
+    return [full]
 
 
 async def search(request):
@@ -493,22 +499,27 @@ async def _cached_or_search_items(query):
     return result
 
 
-async def _load_grouped_title(title_name, title_id=None):
+async def _load_grouped_title(title_name, title_id=None, year_hint=None):
     """Load the complete real variant pool for one logical title.
 
-    Search uses a small candidate window for speed; opening a title or resolving
-    a file uses the larger bounded window so all real seasons/episodes and
-    variants for that title are retained.
+    ``title_name`` is a logical identity, never a Telegram file ID.  Mongo
+    records are still the source of truth for every season/episode/variant.
     """
     name = str(title_name or "").strip()
     if not name:
         return None
+
     docs = await search_media(name, limit=TITLE_VARIANT_LIMIT)
     items = await asyncio.to_thread(normalize, docs)
     if title_id:
         return next((item for item in items if item.get("id") == title_id), None)
+
     wanted = normalize_for_search(name)
     exact = [item for item in items if normalize_for_search(item.get("title")) == wanted]
+    if year_hint is not None:
+        year_exact = [item for item in exact if item.get("year") in (None, year_hint)]
+        if year_exact:
+            exact = year_exact
     if exact:
         return exact[0]
     return next((item for item in items if search_title_score(item.get("title"), name) >= 0.90), None)
@@ -616,11 +627,17 @@ async def filter_options(request):
         if variant.get("quality") and str(variant.get("quality")).strip().lower()!="auto"
     ), key=lambda value: (int(re.search(r"\d+",value).group()) if re.search(r"\d+",value) else 9999, value.casefold()))
     qualities=qualities or FILTER_QUALITIES
+    captions=sorted(set(
+        str(value) for variant in variants
+        for value in (variant.get("subtitle_languages") or [])
+        if value
+    ), key=str.casefold)
 
     return web.json_response({
         "ok":True,
         "languages":languages,
         "qualities":qualities,
+        "captions":captions,
         "seasons":seasons,
         "episodes":episodes,
         "type":target.get("type"),
@@ -645,6 +662,7 @@ async def filter_media(request):
         raise web.HTTPBadRequest(text="Invalid season or episode") from exc
     language=request.query.get("language","").strip() or None
     quality=request.query.get("quality","").strip() or None
+    subtitle=request.query.get("subtitle","").strip() or None
 
     prepared=_autofilter_prepare_query(query)
     parsed=normalize_query(prepared)
@@ -660,6 +678,7 @@ async def filter_media(request):
         episode=episode,
         language=language,
         quality=quality,
+        subtitle=subtitle,
         limit=SEARCH_MAX_DOCS,
     )
     files=await asyncio.to_thread(_parsed_files, files)
