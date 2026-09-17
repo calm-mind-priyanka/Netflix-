@@ -70,26 +70,16 @@ SEARCH_CACHE_TTL = 30
 SEARCH_CACHE_MAX = 256
 SEARCH_INFLIGHT = {}
 SEARCH_SEMAPHORE = asyncio.Semaphore(3)
-# Search must see the complete logical title pool, not only the newest 120
-# files. Otherwise a series such as Reacher can lose older seasons/episodes
-# that are already present in MongoDB. Keep the result bounded for Koyeb Free,
-# while allowing the existing SEARCH_MAX_DOCS setting to control the ceiling.
-try:
-    SEARCH_CANDIDATE_LIMIT = min(
-        max(200, int(os.getenv("SEARCH_CANDIDATE_LIMIT", str(SEARCH_MAX_DOCS)))),
-        1500,
-    )
-except (TypeError, ValueError):
-    SEARCH_CANDIDATE_LIMIT = min(max(200, int(SEARCH_MAX_DOCS)), 1500)
+SEARCH_CANDIDATE_LIMIT = min(max(80, int(os.getenv("SEARCH_CANDIDATE_LIMIT", "120"))), 300)
 HOME_CACHE = None
 HOME_CACHE_TIME = 0.0
 
 # Keep homepage catalog work bounded. The website only needs enough recent
 # media records to build the visible homepage; it must never materialize the
 # entire bot collection in RAM on a small Koyeb instance.
-HOME_DOC_LIMIT = 180
-HOME_TITLE_LIMIT = 80
-HOME_ENRICH_LIMIT = 12
+HOME_DOC_LIMIT = 300
+HOME_TITLE_LIMIT = 100
+HOME_ENRICH_LIMIT = 100
 SEARCH_ENRICH_LIMIT = 1
 # Never let an environment value such as 10000 turn one HTTP request into a
 # huge in-memory MongoDB result set. The exact title can still have many real
@@ -353,10 +343,9 @@ async def _raw_autofilter_files(query, limit=None):
         if not docs:
             parsed_query = normalize_query(prepared)
             title = parsed_query.get("title") or prepared
-            if parsed_query.get("year") is None:
-                docs = await search_media(title, limit=bounded)
-                if not docs:
-                    docs = await fuzzy_search_media(title, limit=min(40, bounded))
+            docs = await search_media(title, limit=bounded)
+            if not docs and parsed_query.get("year") is None:
+                docs = await fuzzy_search_media(title, limit=min(40, bounded))
         return await asyncio.to_thread(_parsed_files, docs)
 
 
@@ -384,9 +373,7 @@ async def _search_uncached(query):
 
     async with SEARCH_SEMAPHORE:
         docs = await search_media(base_query, limit=SEARCH_CANDIDATE_LIMIT)
-        # An explicit year is authoritative. Never turn "Toxic 2026" into
-        # a yearless "Toxic" search, which can select a different release.
-        if not docs and parsed.get("year") is None and search_title.casefold() != base_query.casefold():
+        if not docs and search_title.casefold() != base_query.casefold():
             docs = await search_media(search_title, limit=SEARCH_CANDIDATE_LIMIT)
         if not docs and parsed.get("year") is None:
             fuzzy_docs = await fuzzy_search_media(search_title, limit=min(40, SEARCH_CANDIDATE_LIMIT))
@@ -413,8 +400,7 @@ async def _search_uncached(query):
 
     # Group only the SEARCH PRESENTATION by logical title. The underlying
     # Mongo records remain individual raw files and are never collapsed for
-    # Auto Filter/playback. The group id is the same canonical title identity
-    # used by the title endpoint, never a raw file id.
+    # Auto Filter/playback.
     grouped = {}
     for item in raw_items:
         title = str(item.get("title") or "Untitled").strip()
@@ -423,20 +409,14 @@ async def _search_uncached(query):
         key = (normalize_for_search(title), kind, year)
         if key not in grouped:
             copy = dict(item)
-            copy["id"] = stable_id(title, kind, year)
+            copy["id"] = f"file:{copy.get('file_id') or len(grouped)}"
             copy["raw_match_count"] = 0
             grouped[key] = copy
         grouped[key]["raw_match_count"] += 1
 
     selected = list(grouped.values())
-    # Prefer an exact logical-title match. For example, searching "Toxic"
-    # must select the real Toxic movie before "Toxic Love Story" even when
-    # the latter has more matching release files. For series, S/E remains a
-    # selection hint only; it never changes the main title identity.
-    query_title_norm = normalize_for_search(search_title)
     selected.sort(
         key=lambda item: (
-            0 if normalize_for_search(item.get("title")) == query_title_norm else 1,
             0 if (parsed.get("season") is None or item.get("season") == parsed.get("season"))
             and (parsed.get("episode") is None or item.get("episode") == parsed.get("episode")) else 1,
             -int(item.get("raw_match_count") or 0),
@@ -513,76 +493,51 @@ async def _cached_or_search_items(query):
     return result
 
 
-async def _load_grouped_title(title_name, title_id=None, year=None):
-    """Load the complete real variant pool for one logical title, bounded.
+async def _load_grouped_title(title_name, title_id=None):
+    """Load the complete real variant pool for one logical title.
 
-    If a release year is known, it is part of the identity. This prevents a
-    same-name older/newer release from being selected just because MongoDB
-    returned it first.
+    Search uses a small candidate window for speed; opening a title or resolving
+    a file uses the larger bounded window so all real seasons/episodes and
+    variants for that title are retained.
     """
     name = str(title_name or "").strip()
     if not name:
         return None
-    parsed_name = normalize_query(name)
-    wanted_year = year if year is not None else parsed_name.get("year")
-    search_name = parsed_name.get("title") or name
-    base_query = f"{search_name} {wanted_year}" if wanted_year is not None else search_name
-    docs = await search_media(base_query, limit=TITLE_VARIANT_LIMIT)
+    docs = await search_media(name, limit=TITLE_VARIANT_LIMIT)
     items = await asyncio.to_thread(normalize, docs)
-    if wanted_year is not None:
-        year_items = [item for item in items if item.get("year") == int(wanted_year)]
-        if year_items:
-            items = year_items
-        else:
-            return None
     if title_id:
-        # Search results use the canonical title identity. Accept both the
-        # canonical id and the legacy catalog id so existing deep links remain
-        # valid after deployment.
-        target = next((item for item in items if item.get("id") == title_id), None)
-        if target:
-            return target
-        target = next(
-            (item for item in items
-             if stable_id(item.get("title"), item.get("type", "movie"), item.get("year")) == str(title_id)),
-            None,
-        )
-        if target:
-            return target
-    wanted = normalize_for_search(search_name)
+        return next((item for item in items if item.get("id") == title_id), None)
+    wanted = normalize_for_search(name)
     exact = [item for item in items if normalize_for_search(item.get("title")) == wanted]
     if exact:
         return exact[0]
-    return next((item for item in items if search_title_score(item.get("title"), search_name) >= 0.90), None)
+    return next((item for item in items if search_title_score(item.get("title"), name) >= 0.90), None)
 
 
 async def title(request):
     title_id = request.match_info["id"]
     requested_name = request.query.get("q", "").strip()
-    try:
-        requested_year = int(request.query.get("year")) if request.query.get("year") not in (None, "") else None
-    except ValueError:
-        raise web.HTTPBadRequest(text="Invalid year")
 
-    # Legacy search results used raw file ids. Keep a compatibility path for
-    # cached/deep-linked clients, while new results use the canonical title id.
+    # Search results are raw Auto Filter file records. When the search UI
+    # opens the first result automatically, resolve that raw id back to its
+    # logical Netflix title instead of treating the file id as a catalog id.
     if str(title_id).startswith("file:"):
         for _key, (stamp, cached_items) in list(SEARCH_CACHE.items()):
             if time.time() - stamp >= SEARCH_CACHE_TTL:
                 continue
             target = next((item for item in cached_items if item.get("id") == title_id), None)
             if target and target.get("title"):
-                full = await _load_grouped_title(target.get("title"), None, target.get("year"))
+                full = await _load_grouped_title(target.get("title"), None)
                 if full:
                     return web.json_response({"ok": True, **await enrich(full)})
         if requested_name:
-            full = await _load_grouped_title(requested_name, None, requested_year)
+            full = await _load_grouped_title(requested_name, None)
             if full:
                 return web.json_response({"ok": True, **await enrich(full)})
         raise web.HTTPNotFound(text="Title not found")
 
     if requested_name:
-        target = await _load_grouped_title(requested_name, title_id, requested_year)
+        target = await _load_grouped_title(requested_name, title_id)
         if target:
             return web.json_response({"ok": True, **await enrich(target)})
 
@@ -600,6 +555,10 @@ async def title(request):
 
 def _same_text(value, wanted):
     return normalize_for_search(value) == normalize_for_search(wanted)
+
+
+FILTER_LANGUAGES = ["Malayalam", "Tamil", "English", "Hindi", "Telugu", "Kannada", "Gujarati", "Marathi", "Punjabi"]
+FILTER_QUALITIES = ["360P", "480P", "720P", "1080P", "1440P", "2160P"]
 
 
 def _best_file(variants):
@@ -648,14 +607,15 @@ async def filter_options(request):
         str(value)
         for variant in variants
         for value in (variant.get("audio_languages") or variant.get("languages") or [])
-        if value and str(value).casefold() != "unknown"
-    ), key=str.casefold)
+        if value
+    ), key=str.casefold) or FILTER_LANGUAGES
 
     qualities=sorted(set(
         str(variant.get("quality")).strip()
         for variant in variants
         if variant.get("quality") and str(variant.get("quality")).strip().lower()!="auto"
     ), key=lambda value: (int(re.search(r"\d+",value).group()) if re.search(r"\d+",value) else 9999, value.casefold()))
+    qualities=qualities or FILTER_QUALITIES
 
     return web.json_response({
         "ok":True,
