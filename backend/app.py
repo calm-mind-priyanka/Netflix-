@@ -92,6 +92,7 @@ HOME_CACHE_TIME = 0.0
 ULTRON_SEARCH = UltronSearchEngine()
 ULTRON_SEARCH_CONCURRENCY = 3
 VERIFY_STATE = {}
+from .web_store import verification_tokens, ensure_indexes as ensure_web_indexes
 
 # Keep homepage catalog work bounded. The website only needs enough recent
 # media records to build the visible homepage; it must never materialize the
@@ -940,51 +941,44 @@ async def _make_shortlink(url, stage):
         return url
 
 
-def _verification_stage(cookie_value):
-    if not cookie_value:
+async def _verification_stage(cookie_value):
+    if not cookie_value or verification_tokens is None:
         return 0, 0
-    state = VERIFY_STATE.get(cookie_value)
-    if not state:
-        return 0, 0
-    if state["expires"] < time.time():
-        VERIFY_STATE.pop(cookie_value, None)
+    await ensure_web_indexes()
+    state = await verification_tokens.find_one({"code": cookie_value})
+    if not state or float(state.get("expires", 0)) < time.time():
         return 0, 0
     return int(state.get("stage", 0)), float(state.get("verified_at", 0))
-
 
 async def _verification_requirement(request, file_id):
     settings = get_admin_settings().get("verification", {})
     if not bool(settings.get("enabled", False)):
         return None
     cookie = request.cookies.get("stream_verify", "")
-    stage, verified_at = _verification_stage(cookie)
-    now = time.time()
-    required = 1
-    if stage >= 1 and int(settings.get("verification_time_2", 0) or 0) > 0:
-        if now - verified_at >= int(settings["verification_time_2"]):
-            required = 2
-    if stage >= 2 and int(settings.get("verification_time_3", 0) or 0) > 0:
-        if now - verified_at >= int(settings["verification_time_3"]):
-            required = 3
-    if stage >= required:
-        return None
-
+    stage, verified_at = await _verification_stage(cookie)
+    now = time.time(); required = 1
+    if stage >= 1 and int(settings.get("verification_time_2", 0) or 0) > 0 and now - verified_at >= int(settings["verification_time_2"]): required = 2
+    if stage >= 2 and int(settings.get("verification_time_3", 0) or 0) > 0 and now - verified_at >= int(settings["verification_time_3"]): required = 3
+    if stage >= required: return None
+    await ensure_web_indexes()
     code = secrets.token_urlsafe(24)
-    VERIFY_STATE[code] = {"file_id": str(file_id), "stage": required, "verified_at": 0, "expires": now + 900}
+    await verification_tokens.insert_one({"code":code,"file_id":str(file_id),"stage":required,"verified_at":0,"expires":now+900,"created_at":now})
     local = str(request.url.with_path("/api/verify").with_query(code=code))
     link = await _make_shortlink(local, required)
     tutorial = str(settings.get(f"tutorial_{required}") or settings.get("tutorial_1") or "").strip()
-    return {"verification_required": True, "verification_url": link, "tutorial_url": tutorial, "stage": required}
-
+    return {"verification_required":True,"verification_url":link,"tutorial_url":tutorial,"stage":required}
 
 async def verify_stream(request):
     code = request.query.get("code", "").strip()
-    state = VERIFY_STATE.get(code)
-    if not state or state.get("expires", 0) < time.time():
+    await ensure_web_indexes()
+    state = await verification_tokens.find_one({"code":code}) if code else None
+    if not state or float(state.get("expires",0)) < time.time():
         raise web.HTTPBadRequest(text="Verification link expired. Please request a new link.")
-    VERIFY_STATE[code] = {**state, "verified_at": time.time()}
-    response = web.Response(text="Verification successful. Return to the player and press Play again.", content_type="text/html")
-    response.set_cookie("stream_verify", code, httponly=True, secure=request.secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https", samesite="Lax", max_age=900, path="/")
+    await verification_tokens.update_one({"code":code},{"$set":{"verified_at":time.time()}})
+    public_url = PUBLIC_URL.rstrip("/") if PUBLIC_URL else str(request.url.origin())
+    html = f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Verification complete</title><style>body{{font-family:system-ui;background:#080808;color:#fff;display:grid;place-items:center;min-height:100vh;margin:0}}main{{max-width:520px;text-align:center;padding:28px}}a{{display:inline-block;margin-top:18px;padding:12px 18px;border-radius:10px;background:#fff;color:#000;text-decoration:none;font-weight:700}}</style></head><body><main><h1>✓ Verification complete</h1><p>Verification is complete. Return to StreamBox and press Play again.</p><a href="{public_url}/">Return to StreamBox</a></main></body></html>'''
+    response = web.Response(text=html, content_type="text/html")
+    response.set_cookie("stream_verify",code,httponly=True,secure=True,samesite="Lax",max_age=900,path="/")
     return response
 
 
@@ -1356,6 +1350,7 @@ async def maintenance_middleware(request, handler):
 
 
 async def startup(app):
+    await ensure_web_indexes()
     missing = []
     if not DATABASE_URI:
         missing.append("DATABASE_URI")
@@ -1402,7 +1397,8 @@ async def cleanup(app):
 
     # Close both Motor clients without ever writing to the bot collections.
     from . import database
-    for mongo_client in (database.client, database.client2):
+    from . import web_store
+    for mongo_client in (database.client, database.client2, getattr(web_store, "_client", None)):
         if mongo_client is not None:
             mongo_client.close()
 
