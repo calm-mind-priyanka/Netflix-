@@ -1,36 +1,31 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#090909"><title>StreamBox</title><link rel="stylesheet" href="/css/style.css"><script src="https://checkout.razorpay.com/v1/checkout.js"></script></head><body><div id="startup" class="startup" aria-live="polite">
-  <section id="splashStage" class="startupStage splashStage" aria-label="StreamBox">
-    <div class="splashBrand">
-      <div class="streamboxLogo" aria-label="StreamBox">
-        <span>S</span><span>T</span><span>R</span><span>E</span><span>A</span><span>M</span><span>B</span><span>O</span><span>X</span>
-      </div>
-      <div class="loadingRing" aria-hidden="true"></div>
-    </div>
-  </section>
-  <section id="loadingStage" class="startupStage loadingStage hidden" aria-label="Loading">
-    <div class="loadingBrand">
-      <div class="loadingLogo">STREAMBOX</div>
-      <div class="loadingRing loadingRingSmall" aria-hidden="true"></div>
-    </div>
-    <p>Loading your entertainment...</p>
-  </section>
-  <section id="introStage" class="startupStage introStage hidden">
-    <div class="introPanel">
-      <div class="introKicker">YOUR ENTERTAINMENT, SIMPLIFIED</div>
-      <h1>WELCOME TO STREAMBOX</h1>
-      <p class="introLead">Discover movies and series in one simple place.</p>
-      <div id="introSamples" class="introSamples" aria-label="Catalog preview"></div>
-      <div class="introFeatures">
-        <span>Discover movies &amp; series</span>
-        <span>Search titles easily</span>
-        <span>Choose quality &amp; language</span>
-        <span>Browse seasons &amp; episodes</span>
-        <span>Start watching easily</span>
-      </div>
-      <button id="startStreaming" class="primary introButton">START STREAMING</button>
-      <p class="introRights">© 2026 StreamBox. All rights reserved.</p>
-      <p class="introFootnote">A free testing website built for simple, easy entertainment discovery.</p>
-    </div>
-  </section>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#07111f"><meta name="description" content="VYRA — a fast AutoFilter-style movie and series finder.">
+<title>VYRA</title>
+<link rel="stylesheet" href="/css/style.css">
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+</head>
+<body>
+<div id="app" class="app hidden">
+<header class="topbar"><button class="wordmark" id="homeBtn">VYRA</button><div class="topActions"><button id="premiumBtn" class="topLink">Premium</button><button id="searchBtn" class="searchIcon" aria-label="Search">⌕</button></div></header>
+<main id="main">
+<section class="welcome"><p class="eyebrow">FAST • SIMPLE • REAL FILES</p><h1>Find it. Pick it. <span>Play it.</span></h1><p>Search the AutoFilter catalog without the heavy OTT clutter.</p><div class="searchMini"><input id="homeQuery" placeholder="Search movie, series, season or episode…" autocomplete="off"><button id="homeSearch">Search</button></div></section>
+<section id="searchSection" class="section hidden"><div class="sectionHead"><div><p class="eyebrow">AUTOFILTER SEARCH</p><h2 id="resultTitle">Results</h2></div><button id="clearSearch" class="ghost">Clear</button></div><div id="results" class="textList"></div></section>
+<section class="section" id="homeSections">
+<div class="sectionHead"><div><p class="eyebrow">DISCOVER</p><h2>Trending</h2></div></div><div id="trending" class="nameRail"></div>
+<div class="sectionHead compact"><h2>Newly added</h2></div><div id="latest" class="nameRail"></div>
+<div class="split"><div><div class="sectionHead compact"><h2>Movies</h2></div><div id="movies" class="nameList"></div></div><div><div class="sectionHead compact"><h2>Web Series</h2></div><div id="series" class="nameList"></div></div></div>
+<div class="sectionHead compact"><h2>Categories</h2></div><div id="categories" class="categoryList"></div>
+</section>
+<section id="premiumSection" class="section premiumSection"><div class="sectionHead"><div><p class="eyebrow">ACCESS</p><h2>Premium</h2></div><span id="premiumBadge" class="badge">FREE</span></div><p id="premiumCopy">Premium can remove verification checks when enabled by the admin.</p><div id="premiumPlans" class="plans"></div><div id="manualPay" class="manual hidden"><p id="manualInstructions"></p><img id="manualQr" class="manualQr hidden" alt="Payment QR"><div class="upload"><label>Payment screenshot<input id="premiumProof" type="file" accept="image/png,image/jpeg,image/webp"></label><textarea id="premiumNote" placeholder="Optional note"></textarea><button id="manualSubmit">Submit proof</button></div><p id="manualState"></p></div></section>
+</main>
+<footer><span>VYRA</span><span>Light by design • Built for fast catalog search</span></footer>
 </div>
-<div id="appShell" class="appShell startupHidden"><header><div class="brand"><span class="brandMark">S</span><span class="brandText">STREAMBOX</span></div><button id="searchBtn" class="iconBtn" aria-label="Search">⌕</button></header><main><section id="hero" class="hero"></section><section id="premium" class="section premiumBox"><h2>Premium Plans</h2><p id="premiumStatus">Loading plans…</p><div id="premiumPlans" class="premiumPlans"></div><div id="manualPremium" class="manualPremium hidden"><p id="manualInstructions"></p><img id="manualQr" class="manualQr hidden" alt="Payment QR"><label>Payment screenshot <input id="premiumProof" type="file" accept="image/png,image/jpeg,image/webp"></label><label>Note (optional)<textarea id="premiumNote" rows="2"></textarea></label><button id="premiumManualSubmit" class="primary">Send Payment Proof</button><p id="premiumManualState"></p></div></section><section id="continue" class="section hidden"><h2>Continue Watching</h2><div id="continueRow" class="row"></div></section><section class="section"><h2>Latest</h2><div id="latest" class="row"></div></section><section class="section"><h2>Movies</h2><div id="movies" class="grid"></div></section><section class="section"><h2>Series</h2><div id="series" class="grid"></div></section></main><nav><button id="bottomHome" aria-label="Home">⌂<small>Home</small></button><button id="bottomSearch">⌕<small>Search</small></button></nav><div id="search" class="panel hidden"><div class="searchbar"><button id="closeSearch">×</button><input id="query" placeholder="Search movies & series..."></div><div id="results" class="grid"></div></div><div id="details" class="panel hidden"><button id="backDetails">‹</button><div id="detailBody"></div></div><div id="player" class="player hidden"><button id="closePlayer" class="close">×</button><video id="video" controls playsinline></video><div class="now"><strong id="nowPlaying"></strong><button id="captionToggle" aria-label="Show file caption">▤</button><button id="download">⇩</button><button id="settings">⚙</button></div><div id="fileCaption" class="fileCaption hidden"></div><div id="menu" class="menu hidden"><h3>Settings</h3><b>Language</b><div id="language"></div><b>Audio</b><div id="audio"></div><b>Quality</b><div id="quality"></div></div><button id="next" class="next hidden">Next Episode ›</button></div><script src="/js/api.js"></script><script src="/js/Player.js"></script><script src="/js/app.js"></script></div></body></html>
+<div id="detail" class="overlay hidden"><div class="drawer"><button class="close" data-close="detail">×</button><div id="detailBody"></div></div></div>
+<div id="verify" class="overlay hidden"><div class="modal"><button class="close" data-close="verify">×</button><p class="eyebrow">ACCESS CHECK</p><h2>Verification required</h2><p id="verifyText">Verification is required before this file can be opened.</p><div class="verifyActions"><a id="verifyLink" class="primary" target="_blank" rel="noopener">Start verification</a><a id="telegramLink" class="secondary hidden" target="_blank" rel="noopener">Open Telegram</a><a id="tutorialLink" class="secondary hidden" target="_blank" rel="noopener">How to verify</a><button id="verifyRefresh" class="secondary">Check again</button><button id="buyPremiumFromVerify" class="secondary">Buy Premium</button></div><p id="verifyState" class="muted"></p></div></div>
+<div id="playerLayer" class="overlay hidden"><div class="playerBox"><button class="close" id="playerClose">×</button><video id="video" controls playsinline preload="metadata"></video><p id="playerInfo" class="muted"></p></div></div>
+<div id="toast" class="toast"></div>
+<script src="/js/api.js"></script><script src="/js/Player.js"></script><script src="/js/app.js"></script>
+</body></html>
