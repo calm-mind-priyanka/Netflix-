@@ -81,13 +81,13 @@ const Player={
   // Match Auto Filter: these choices are predefined and are intentionally
   // shown even when the current title has no matching file. Availability is
   // checked only after the user clicks a choice through /api/resolve.
-  languageChoices(){return ["Malayalam","Tamil","English","Hindi","Telugu","Kannada","Gujarati","Marathi","Punjabi"]},
-  qualityChoices(){return ["360P","480P","720P","1080P","1440P","2160P"]},
+  languageChoices(){const values=[]; for(const v of (this.allVariants||[])){for(const x of (v.languages||v.audio_languages||[])){if(x&&x!=="Unknown")values.push(x);}} return [...new Set(values)].sort((a,b)=>String(a).localeCompare(String(b)));},
+  qualityChoices(){return [...new Set((this.allVariants||[]).map(v=>v?.quality).filter(v=>v&&String(v).toLowerCase()!=="auto"))].sort((a,b)=>(Number(String(a).match(/\d+/)?.[0]||0)-Number(String(b).match(/\d+/)?.[0]||0)));},
   sourceChoices(){
     return [...new Set((this.allVariants||[]).map(v=>v?.source).filter(v=>v&&String(v).toLowerCase()!=="unknown"))]
       .sort((a,b)=>String(a).localeCompare(String(b)));
   },
-  seasonChoices(){return this.titleType==="series"?[1,2,3,4,5,6,7,8,9,10]:[]},
+  seasonChoices(){return this.titleType==="series"?[...new Set((this.allVariants||[]).map(v=>Number(v?.season)).filter(Number.isFinite))].sort((a,b)=>a-b):[]},
   episodeChoices(){
     if(this.filterEpisodes?.length)return [...this.filterEpisodes].sort((a,b)=>a-b);
     const season=Number(this.season);
@@ -98,7 +98,7 @@ const Player={
   allQualities(){return this.qualityChoices()},
   allSources(){return this.sourceChoices()},
   allSeasons(){return this.seasonChoices()},
-  episodesForSeason(season){return this.episodeChoices()},
+  episodesForSeason(season){return [...new Set((this.allVariants||[]).filter(v=>Number(v?.season)===Number(season)).map(v=>Number(v?.episode)).filter(Number.isFinite))].sort((a,b)=>a-b)},
 
   render(){
     const audio=this.allAudioLanguages();
