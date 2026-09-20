@@ -203,6 +203,9 @@ def _validate(state):
         raise ValueError("verification.file_mode_type must be single, group, or both")
     if v["shortlink_mode"] not in {"enabled", "disabled"}:
         raise ValueError("verification.shortlink_mode must be enabled or disabled")
+    # Website verification is browser-based. Telegram is not a required
+    # verification dependency; each enabled stage must have a provider name
+    # and API key before it is allowed to generate a short link.
     if s["result_mode"] not in {"buttons", "links"}:
         raise ValueError("search.result_mode must be buttons or links")
     s["max_results"] = max(1, min(50, int(s["max_results"])))
