@@ -1,55 +1,47 @@
-# Ultron DNA — A→Z integration changelog
+# Ultron DNA A→Z rebuild
 
-This build integrates the supplied Ultron AutoFilter behavior into the website where the concepts apply to a web/OTT application.
-
-## Admin settings tree
-
-The admin panel now mirrors the supplied `plugins/settings.py` hierarchy:
-
-- Verification / shortlink enable state
-- 1st / 2nd / 3rd shortener website/name and API key
-- Verification time 1/2 and 2/3
-- Tutorial 1/2/3
-- File mode (`file`, `allfiles`, `notcopy`)
-- File mode type and shortlink mode
-- Result mode (`buttons` / `links`)
-- Max results
-- File secure
-- Auto delete + delete time
-- Welcome
-- IMDb/poster switch
-- Log channel
-- Force-sub channel list
-- Custom file caption
-- Search candidate/cache/concurrency controls
-- Fuzzy/spelling fallback
-- External correction toggle
-- TMDB/poster fallback
-- Maintenance mode
-- Individual remove/reset actions
-
-The settings module also maintains an `ultron` compatibility map using the original setting names such as `is_verify`, `button`, `max_btn`, `shortner`, `api`, `shortner_two`, `api_two`, `shortner_three`, `api_three`, `verify_time`, `third_verify_time`, `tutorial`, `tutorial_2`, `tutorial_3`, `caption`, `log`, `fsub_id`, `auto_delete`, and `auto_del_time`.
-
-## Security
-
-Shortener API values are write-only in the admin API. The browser never receives stored API keys. Leaving an API field blank keeps the existing secret. Individual remove actions restore the setting to its default.
+This build integrates the applicable behavior from the supplied Ultron/AutoFilter project into the Netflix-style website.
 
 ## Search
+- AutoFilter-style Mongo regex search first.
+- Filename + caption search.
+- Bounded candidate retrieval and no full collection scan per request.
+- Local fuzzy/spelling fallback only after normal search fails.
+- Optional one-shot IMDb/Cinemagoer correction only after local fuzzy search fails.
+- External correction candidates are accepted only when real Mongo media exists for the corrected title.
+- Exact title/year ranking and logical movie/series grouping.
+- Season/episode tokens are search context, not new catalog identities.
+- `S01E01`, `S1E1`, `Season 1 Episode 1`, `1x01` and related forms are supported by the parser.
+- Single-flight duplicate searches, bounded concurrency, and TTL/size caches.
+- Two configured AutoFilter media databases are searched concurrently and merged without duplicate file IDs.
 
-Normal Mongo search remains the first path. Local fuzzy search is fallback-only. External correction remains optional/fallback-only. The visible result count now honors the configured Ultron-style max-results value, while the underlying title grouping still prevents physical file/episode duplicates.
+## OTT catalog behavior
+- One logical movie card can contain many real physical Telegram assets.
+- One logical series contains real seasons and real episodes only.
+- No Cartesian-product quality/language generation.
+- Every playable variant retains the original Mongo `_id`/`file_id`.
+- Year/sequel identity is preserved to avoid merging distinct movies.
 
-## Database safety
+## Admin panel
+- Nested Ultron-compatible settings tree.
+- 1st/2nd/3rd shortener name + API.
+- Verification timing and tutorial links.
+- File/All-files/Not-copy mode configuration.
+- Max results and result mode.
+- Fuzzy/spell-check/external correction controls.
+- Search candidate/cache/concurrency controls are live, not decorative.
+- TMDB/poster controls are live.
+- Maintenance mode is live.
+- Admin remove/reset/save actions are live and validated.
+- Shortener test action uses the configured Shortzy provider when available.
+- Verification can protect website stream-token issuance with staged shortlink verification.
 
-The AutoFilter media MongoDB remains read-only. Website settings are stored separately using `WEBSITE_SETTINGS_FILE`.
+## Safety/performance
+- AutoFilter media MongoDB is read-only from the website.
+- `/health` stays lightweight.
+- TMDB and IMDb work are outside the normal fast search path and are bounded/time-limited.
+- Stream disconnect exceptions remain non-fatal.
+- No generated `__pycache__`/`.pyc` files are included in the deployment archive.
 
-## Streaming safety
-
-The existing exact Telegram media resolution/streaming path was retained. The website still resolves the stored media record and its exact Telegram file reference rather than inventing file IDs.
-
-## Validation performed
-
-- Python `compileall` — PASS
-- settings smoke test — PASS
-- settings compatibility/redaction/remove test — PASS
-- parser sample tests for movie/series/season/episode cases — PASS
-- JavaScript syntax checks for admin/app/api/player — PASS
+## Telegram-only settings
+Force-subscription membership checks, Telegram bot callback commands, Telegram message deletion, and Telegram `/start` verification are Telegram-runtime features. The website does not fake these as browser-native operations.
