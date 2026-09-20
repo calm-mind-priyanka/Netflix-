@@ -45,6 +45,7 @@ async def ensure_indexes():
         await premium_manual.create_index([("status", 1), ("created_at", 1)])
         await verification_tokens.create_index("code", unique=True)
         await verification_tokens.create_index("expires", expireAfterSeconds=0)
+        await verification_tokens.create_index([("user_id", 1), ("stage", 1), ("expires", -1)])
         await settings.create_index("_id", unique=True)
         await catalog_index.create_index("_id", unique=True)
         await catalog_index.create_index([("title_norm", 1), ("type", 1), ("year", 1)])
