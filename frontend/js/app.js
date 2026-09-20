@@ -738,8 +738,15 @@ async function loadPremiumPlan(){
   }catch(e){statusEl.textContent='Premium status unavailable.';}
 }
 async function startPremium(planId,d){
-  if(d.provider==='manual'||d.provider==='both'){
+  if(d.provider==='manual'){
     const manual=document.getElementById('manualPremium'); manual.classList.remove('hidden'); manual.dataset.plan=planId; manual.scrollIntoView({behavior:'smooth',block:'center'}); return;
+  }
+  if(d.provider==='both'){
+    const choice=window.prompt('Payment method: type RAZORPAY for online payment or MANUAL for screenshot approval.','RAZORPAY');
+    if(!choice)return;
+    if(String(choice).toLowerCase().startsWith('manual')){
+      const manual=document.getElementById('manualPremium'); manual.classList.remove('hidden'); manual.dataset.plan=planId; manual.scrollIntoView({behavior:'smooth',block:'center'}); return;
+    }
   }
   try{
     const r=await fetch('/api/premium/order',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({plan_id:planId})}); const o=await r.json();
