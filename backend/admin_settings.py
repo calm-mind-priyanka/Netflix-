@@ -19,12 +19,13 @@ DEFAULT_SETTINGS = {
     "verification": {
         "enabled": False,
         "shorteners": {
-            "1": {"name": "", "api": ""},
-            "2": {"name": "", "api": ""},
-            "3": {"name": "", "api": ""},
+            "1": {"enabled": False, "name": "", "api": ""},
+            "2": {"enabled": False, "name": "", "api": ""},
+            "3": {"enabled": False, "name": "", "api": ""},
         },
         "verification_time_2": 0,
         "verification_time_3": 0,
+        "validity_hours": 24,
         "tutorial_1": "",
         "tutorial_2": "",
         "tutorial_3": "",
@@ -155,10 +156,13 @@ def _sync_ultron_aliases(state):
         "log": f["log_channel"],
         "fsub_id": list(f["fsub_channels"]),
         "caption": f["custom_caption"],
+        "shortner_enabled": bool(v["shorteners"]["1"].get("enabled", False)),
         "shortner": v["shorteners"]["1"]["name"],
         "api": v["shorteners"]["1"]["api"],
+        "shortner_two_enabled": bool(v["shorteners"]["2"].get("enabled", False)),
         "shortner_two": v["shorteners"]["2"]["name"],
         "api_two": v["shorteners"]["2"]["api"],
+        "shortner_three_enabled": bool(v["shorteners"]["3"].get("enabled", False)),
         "shortner_three": v["shorteners"]["3"]["name"],
         "api_three": v["shorteners"]["3"]["api"],
         "verify_time": int(v["verification_time_2"]),
@@ -209,6 +213,7 @@ def _validate(state):
     f["auto_delete_seconds"] = max(1, min(86400, int(f["auto_delete_seconds"])))
     v["verification_time_2"] = max(0, min(86400, int(v["verification_time_2"])))
     v["verification_time_3"] = max(0, min(86400, int(v["verification_time_3"])))
+    v["validity_hours"] = max(1, min(720, int(v.get("validity_hours", 24))))
     for key in ("tutorial_1", "tutorial_2", "tutorial_3"):
         if v[key] and not _valid_url(v[key]):
             raise ValueError(f"{key} must be an http(s) URL")
@@ -240,10 +245,11 @@ def _apply_legacy_patch(state, patch):
             value = u[key]
             if key == "button": value = "buttons" if value else "links"
             target[field] = value
-    short_map = {"1": ("shortner", "api"), "2": ("shortner_two", "api_two"), "3": ("shortner_three", "api_three")}
-    for num, (name_key, api_key) in short_map.items():
+    short_map = {"1": ("shortner", "api", "shortner_enabled"), "2": ("shortner_two", "api_two", "shortner_two_enabled"), "3": ("shortner_three", "api_three", "shortner_three_enabled")}
+    for num, (name_key, api_key, enabled_key) in short_map.items():
         if name_key in u: v["shorteners"][num]["name"] = u[name_key]
         if api_key in u: v["shorteners"][num]["api"] = u[api_key]
+        if enabled_key in u: v["shorteners"][num]["enabled"] = bool(u[enabled_key])
 
 
 async def update_settings(patch):
