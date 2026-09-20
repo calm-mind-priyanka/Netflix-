@@ -9,11 +9,11 @@ async def _ready():
     await ensure_indexes()
 
 def user_id(request):
-    return request.cookies.get('sb_user') or ''
+    return request.cookies.get('vyra_user') or ''
 
 def ensure_user(response):
     uid=secrets.token_urlsafe(18)
-    response.set_cookie('sb_user',uid,httponly=True,samesite='Lax',secure=True,max_age=31536000,path='/')
+    response.set_cookie('vyra_user',uid,httponly=True,samesite='Lax',secure=True,max_age=31536000,path='/')
     return uid
 
 def plan_list():
