@@ -21,6 +21,7 @@ from difflib import SequenceMatcher
 
 from .database import search_media, fuzzy_search_media
 from .parser import _CatalogBuilder, normalize_query, normalize_for_search, parse_doc, search_title_score
+from .web_store import save_catalog_identity
 
 LOGGER = logging.getLogger("streambox.ultron_search")
 
@@ -214,6 +215,10 @@ class UltronSearchEngine:
                 if key_id in seen_ids:
                     continue
                 seen_ids.add(key_id)
+                try:
+                    await save_catalog_identity(item)
+                except Exception:
+                    LOGGER.debug("Could not persist catalog identity", exc_info=True)
                 result.append(item)
                 if len(result) >= max_results:
                     break
