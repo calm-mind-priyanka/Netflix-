@@ -80,3 +80,27 @@ try:
     TRANSCODE_CONCURRENCY = max(1, int(_env("TRANSCODE_CONCURRENCY", "1")))
 except ValueError:
     TRANSCODE_CONCURRENCY = 1
+
+# Optional website premium-plan store/payment settings. This is separate from the
+# read-only AutoFilter media MongoDB. Leave PAYMENT_PROVIDER=manual to use admin grants.
+PAYMENT_PROVIDER = _env("PAYMENT_PROVIDER", "manual").strip().lower()
+RAZORPAY_KEY_ID = _env("RAZORPAY_KEY_ID").strip()
+RAZORPAY_KEY_SECRET = _env("RAZORPAY_KEY_SECRET").strip()
+RAZORPAY_WEBHOOK_SECRET = _env("RAZORPAY_WEBHOOK_SECRET").strip()
+def _plans():
+    raw=_env("PREMIUM_PLANS", "7day|7 Days|29,15day|15 Days|49,30day|30 Days|79,60day|60 Days|129")
+    out={}
+    for item in raw.split(','):
+        try:
+            pid,name,price=item.split('|',2); days=int(pid.replace('day','')); out[pid]={"name":name,"days":days,"price_inr":max(1,int(price))}
+        except Exception: pass
+    return out or {"30day":{"name":"30 Days","days":30,"price_inr":79}}
+PREMIUM_PLANS = _plans()
+PREMIUM_PRICE_INR = min(v["price_inr"] for v in PREMIUM_PLANS.values())
+PREMIUM_DAYS = min(v["days"] for v in PREMIUM_PLANS.values())
+MANUAL_PAYMENT_INSTRUCTIONS = _env("MANUAL_PAYMENT_INSTRUCTIONS", "Pay using the configured UPI/bank method, then upload the payment screenshot for admin approval.")
+MANUAL_PAYMENT_QR = _env("MANUAL_PAYMENT_QR", "")
+PREMIUM_PROOF_DIR = _env("PREMIUM_PROOF_DIR", "/tmp/streambox_premium_proofs")
+PREMIUM_STORE_FILE = _env("PREMIUM_STORE_FILE", "/tmp/streambox_premium.json")
+WEBSITE_DATABASE_URI = _env("WEBSITE_DATABASE_URI").strip()
+WEBSITE_DATABASE_NAME = _env("WEBSITE_DATABASE_NAME", "streambox_users").strip()
