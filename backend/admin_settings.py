@@ -38,6 +38,7 @@ DEFAULT_SETTINGS = {
         "imdb_poster": False,
         "fuzzy_fallback": True,
         "external_correction": True,
+        "spell_check": True,
         "candidate_limit": 120,
         "search_cache_ttl": 30,
         "search_cache_max": 256,
@@ -140,6 +141,7 @@ def _sync_ultron_aliases(state):
         "is_verify": bool(v["enabled"]),
         "button": s["result_mode"] == "buttons",
         "max_btn": int(s["max_results"]),
+        "spell_check": bool(s.get("spell_check", True)),
         "file_secure": bool(f["file_secure"]),
         "auto_delete": bool(f["auto_delete"]),
         "auto_del_time": int(f["auto_delete_seconds"]),
@@ -257,24 +259,25 @@ async def remove_setting(path):
     global STATE
     async with LOCK:
         current = get_settings()
-        keys = str(path).split(".")
+        keys = [k for k in str(path).split(".") if k]
+        if not keys:
+            return deepcopy(current)
         obj = current
+        default_obj = DEFAULT_SETTINGS
         for key in keys[:-1]:
             if not isinstance(obj, dict) or key not in obj:
                 return deepcopy(current)
             obj = obj[key]
-        if isinstance(obj, dict) and keys:
-            key = keys[-1]
-            # Remove-to-default mirrors Ultron's delete_group_setting semantics.
-            defaults = DEFAULT_SETTINGS
-            for part in keys:
-                defaults = defaults.get(part, {}) if isinstance(defaults, dict) else {}
-            obj[key] = deepcopy(defaults) if key in obj else obj.get(key)
+            default_obj = default_obj.get(key, {}) if isinstance(default_obj, dict) else {}
+        leaf = keys[-1]
+        if isinstance(obj, dict) and leaf in obj:
+            default_value = default_obj.get(leaf) if isinstance(default_obj, dict) else None
+            obj[leaf] = deepcopy(default_value)
         _sync_ultron_aliases(current)
         _validate(current)
         _write_sync(current)
         STATE = current
-        return deepcopy(STATE)
+        return deepcopy(current)
 
 
 async def reset_settings():
