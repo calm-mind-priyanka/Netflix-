@@ -32,6 +32,8 @@ from .config import (
     SITE_SECRET,
     HOST,
     TMDB_API_KEY,
+    TELEGRAM_BOT_USERNAME,
+    TELEGRAM_VERIFY_URL,
     TMDB_CACHE_MAX,
     telegram_ready,
 )
@@ -64,7 +66,7 @@ from .parser import (
 from .stream import Streamer, create_client
 from .ultron_search import UltronSearchEngine
 
-LOGGER = logging.getLogger("streambox")
+LOGGER = logging.getLogger("vyra")
 BASE = Path(__file__).resolve().parent.parent
 
 META_CACHE = OrderedDict()
@@ -248,18 +250,49 @@ def _search_score(item, query_title):
 
 
 async def home(request):
+    # The public home is intentionally text-first. It never calls TMDB and never
+    # renders a poster catalog; this keeps the site close to Ultron's lightweight
+    # AutoFilter feel and makes Koyeb Free much cheaper to serve.
     items = (await all_titles(limit=HOME_DOC_LIMIT))[:HOME_TITLE_LIMIT]
-    # Preserve real caption posters and enrich every visible item that is
-    # missing one. TMDB results are cached for a day, so repeat home loads do
-    # not repeat the external requests.
-    enriched = list(items)
-    targets = [i for i, item in enumerate(enriched) if not item.get("poster")][:HOME_ENRICH_LIMIT]
-    if targets and TMDB_API_KEY:
-        values = await asyncio.gather(*(enrich(enriched[i]) for i in targets), return_exceptions=True)
-        for i, value in zip(targets, values):
-            if not isinstance(value, Exception):
-                enriched[i] = value
-    return web.json_response({"ok": True, "items": enriched, "count": len(enriched)})
+    clean = []
+    for item in items:
+        clean.append({
+            "id": item.get("id"),
+            "title": item.get("title"),
+            "type": item.get("type", "movie"),
+            "year": item.get("year"),
+            "languages": item.get("languages") or item.get("audio_languages") or [],
+        })
+    return web.json_response({"ok": True, "items": clean, "count": len(clean)})
+
+
+async def access_status(request):
+    uid = request.cookies.get("vyra_user", "")
+    premium = await get_premium_status(uid)
+    settings = get_admin_settings().get("verification", {})
+    code = request.cookies.get("vyra_verify", "")
+    stage, verified_at = await _verification_stage(code)
+    valid = bool(code and verified_at and stage >= 1)
+    now = time.time()
+    if valid and int(settings.get("verification_time_2", 0) or 0) > 0 and now - verified_at >= int(settings["verification_time_2"]):
+        valid = stage >= 2
+    if valid and int(settings.get("verification_time_3", 0) or 0) > 0 and now - verified_at >= int(settings["verification_time_3"]):
+        valid = stage >= 3
+    response = web.json_response({
+        "ok": True,
+        "verification_enabled": bool(settings.get("enabled", False)),
+        "verified": bool(valid),
+        "verification_stage": int(stage),
+        "verified_at": verified_at,
+        "premium": bool(premium.get("premium")),
+        "expires_at": int(premium.get("expires_at", 0) or 0),
+    })
+    if not uid:
+        # Create the normal website identity lazily when the browser asks for
+        # access state; premium orders use the same persistent cookie.
+        from .premium import ensure_user
+        ensure_user(response)
+    return response
 
 
 def _norm_setting(value):
@@ -649,7 +682,7 @@ async def title(request):
 
     # Search results are raw Auto Filter file records. When the search UI
     # opens the first result automatically, resolve that raw id back to its
-    # logical Netflix title instead of treating the file id as a catalog id.
+    # logical VYRA title instead of treating the file id as a catalog id.
     if str(title_id).startswith("file:"):
         for _key, (stamp, cached_items) in list(SEARCH_CACHE.items()):
             if time.time() - stamp >= SEARCH_CACHE_TTL:
@@ -700,7 +733,7 @@ def _best_file(variants):
 async def filter_options(request):
     """Return controls from the complete real media group.
 
-    Prefer the logical title id supplied by the Netflix UI.  This avoids
+    Prefer the logical title id supplied by the VYRA UI.  This avoids
     re-interpreting a displayed title string (which may contain punctuation,
     numbers or release wording) when a filter button is clicked.
     """
@@ -766,7 +799,7 @@ async def filter_options(request):
 async def filter_media(request):
     """Filter the complete logical title group using real parsed assets.
 
-    Auto Filter's Mongo regex is used to locate a title, but once the Netflix
+    Auto Filter's Mongo regex is used to locate a title, but once the VYRA
     UI has a logical title id we do NOT issue a second Mongo regex for every
     button click.  We load the already-grouped title and apply season, episode,
     language, quality and subtitle constraints to its actual asset records.
@@ -958,7 +991,7 @@ async def _verification_requirement(request, file_id):
     settings = get_admin_settings().get("verification", {})
     if not bool(settings.get("enabled", False)):
         return None
-    cookie = request.cookies.get("stream_verify", "")
+    cookie = request.cookies.get("vyra_verify", "")
     stage, verified_at = await _verification_stage(cookie)
     now = time.time(); required = 1
     if stage >= 1 and int(settings.get("verification_time_2", 0) or 0) > 0 and now - verified_at >= int(settings["verification_time_2"]): required = 2
@@ -970,7 +1003,8 @@ async def _verification_requirement(request, file_id):
     local = str(request.url.with_path("/api/verify").with_query(code=code))
     link = await _make_shortlink(local, required)
     tutorial = str(settings.get(f"tutorial_{required}") or settings.get("tutorial_1") or "").strip()
-    return {"verification_required":True,"verification_url":link,"tutorial_url":tutorial,"stage":required}
+    telegram_url = TELEGRAM_VERIFY_URL or (f"https://t.me/{TELEGRAM_BOT_USERNAME}" if TELEGRAM_BOT_USERNAME else "")
+    return {"verification_required":True,"verification_url":link,"tutorial_url":tutorial,"telegram_url":telegram_url,"stage":required}
 
 async def verify_stream(request):
     code = request.query.get("code", "").strip()
@@ -980,9 +1014,9 @@ async def verify_stream(request):
         raise web.HTTPBadRequest(text="Verification link expired. Please request a new link.")
     await verification_tokens.update_one({"code":code},{"$set":{"verified_at":time.time()}})
     public_url = PUBLIC_URL.rstrip("/") if PUBLIC_URL else str(request.url.origin())
-    html = f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Verification complete</title><style>body{{font-family:system-ui;background:#080808;color:#fff;display:grid;place-items:center;min-height:100vh;margin:0}}main{{max-width:520px;text-align:center;padding:28px}}a{{display:inline-block;margin-top:18px;padding:12px 18px;border-radius:10px;background:#fff;color:#000;text-decoration:none;font-weight:700}}</style></head><body><main><h1>✓ Verification complete</h1><p>Verification is complete. Return to StreamBox and press Play again.</p><a href="{public_url}/">Return to StreamBox</a></main></body></html>'''
+    html = f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Verification complete</title><style>body{{font-family:system-ui;background:#080808;color:#fff;display:grid;place-items:center;min-height:100vh;margin:0}}main{{max-width:520px;text-align:center;padding:28px}}a{{display:inline-block;margin-top:18px;padding:12px 18px;border-radius:10px;background:#fff;color:#000;text-decoration:none;font-weight:700}}</style></head><body><main><h1>✓ Verification complete</h1><p>Verification is complete. Return to VYRA and press Play again.</p><a href="{public_url}/">Return to VYRA</a></main></body></html>'''
     response = web.Response(text=html, content_type="text/html")
-    response.set_cookie("stream_verify",code,httponly=True,secure=True,samesite="Lax",max_age=900,path="/")
+    response.set_cookie("vyra_verify",code,httponly=True,secure=True,samesite="Lax",max_age=900,path="/")
     return response
 
 
@@ -1057,7 +1091,7 @@ async def stream_compatible(request):
 
 async def _premium_active(request):
     try:
-        uid=request.cookies.get("sb_user","")
+        uid=request.cookies.get("vyra_user","")
         return bool((await get_premium_status(uid)).get("premium"))
     except Exception:
         return False
@@ -1425,6 +1459,7 @@ def create_app():
     app.router.add_get("/api/stream-token/{file_id}", token)
     app.router.add_get("/api/download-policy", download_policy)
     app.router.add_get("/api/premium", premium_status)
+    app.router.add_get("/api/access-status", access_status)
     app.router.add_post("/api/premium/order", premium_create_order)
     app.router.add_post("/api/premium/verify", premium_verify_payment)
     app.router.add_post("/api/premium/manual", premium_manual_submit)
