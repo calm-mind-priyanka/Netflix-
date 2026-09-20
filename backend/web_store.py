@@ -26,10 +26,10 @@ if DATABASE_URI:
         connectTimeoutMS=8000,
     )
     _db = _client[DATABASE_NAME]
-    premium_users = _db[os.getenv("WEBSITE_PREMIUM_USERS_COLLECTION", "streambox_premium_users")]
-    premium_orders = _db[os.getenv("WEBSITE_PREMIUM_ORDERS_COLLECTION", "streambox_premium_orders")]
-    premium_manual = _db[os.getenv("WEBSITE_PREMIUM_MANUAL_COLLECTION", "streambox_premium_manual")]
-    verification_tokens = _db[os.getenv("WEBSITE_VERIFY_COLLECTION", "streambox_verification_tokens")]
+    premium_users = _db[os.getenv("WEBSITE_PREMIUM_USERS_COLLECTION", "vyra_premium_users")]
+    premium_orders = _db[os.getenv("WEBSITE_PREMIUM_ORDERS_COLLECTION", "vyra_premium_orders")]
+    premium_manual = _db[os.getenv("WEBSITE_PREMIUM_MANUAL_COLLECTION", "vyra_premium_manual")]
+    verification_tokens = _db[os.getenv("WEBSITE_VERIFY_COLLECTION", "vyra_verification_tokens")]
     settings = _db[WEBSITE_SETTINGS_COLLECTION]
     catalog_index = _db[WEBSITE_CATALOG_COLLECTION]
 
