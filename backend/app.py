@@ -35,7 +35,7 @@ from .config import (
     TMDB_CACHE_MAX,
     telegram_ready,
 )
-from .admin_settings import get_settings as get_admin_settings, get_public_settings, get_value as get_admin_setting, update_settings as update_admin_settings, reset_settings as reset_admin_settings, remove_setting as remove_admin_setting
+from .admin_settings import get_settings as get_admin_settings, get_public_settings, get_value as get_admin_setting, update_settings as update_admin_settings, reset_settings as reset_admin_settings, remove_setting as remove_admin_setting, init_settings_store
 from .premium import status as premium_status, create_order as premium_create_order, verify_payment as premium_verify_payment, webhook as premium_webhook, admin_grant as premium_admin_grant, get_status as get_premium_status, manual_submit as premium_manual_submit, my_manual as premium_my_manual, admin_manual_list as premium_admin_manual_list, admin_manual_proof as premium_admin_manual_proof, admin_manual_decide as premium_admin_manual_decide
 from .database import (
     collection_counts,
@@ -92,7 +92,7 @@ HOME_CACHE_TIME = 0.0
 ULTRON_SEARCH = UltronSearchEngine()
 ULTRON_SEARCH_CONCURRENCY = 3
 VERIFY_STATE = {}
-from .web_store import verification_tokens, ensure_indexes as ensure_web_indexes
+from .web_store import verification_tokens, ensure_indexes as ensure_web_indexes, get_catalog_identity
 
 # Keep homepage catalog work bounded. The website only needs enough recent
 # media records to build the visible homepage; it must never materialize the
@@ -643,6 +643,9 @@ async def _load_grouped_title(title_name, title_id=None, year_hint=None):
 async def title(request):
     title_id = request.match_info["id"]
     requested_name = request.query.get("q", "").strip()
+    identity = await get_catalog_identity(title_id) if title_id else None
+    if identity:
+        requested_name = str(identity.get("title") or requested_name).strip()
 
     # Search results are raw Auto Filter file records. When the search UI
     # opens the first result automatically, resolve that raw id back to its
@@ -663,7 +666,7 @@ async def title(request):
         raise web.HTTPNotFound(text="Title not found")
 
     if requested_name:
-        target = await _load_grouped_title(requested_name, title_id)
+        target = await _load_grouped_title(requested_name, title_id if identity else None, identity.get("year") if identity else None)
         if target:
             return web.json_response({"ok": True, **await enrich(target)})
 
@@ -673,7 +676,7 @@ async def title(request):
             continue
         target = next((item for item in cached_items if item.get("id") == title_id), None)
         if target:
-            full = await _load_grouped_title(target.get("title"), title_id)
+            full = await _load_grouped_title(target.get("title"), title_id, target.get("year"))
             if full:
                 return web.json_response({"ok": True, **await enrich(full)})
 
@@ -945,6 +948,7 @@ async def _verification_stage(cookie_value):
     if not cookie_value or verification_tokens is None:
         return 0, 0
     await ensure_web_indexes()
+    await init_settings_store()
     state = await verification_tokens.find_one({"code": cookie_value})
     if not state or float(state.get("expires", 0)) < time.time():
         return 0, 0
@@ -1351,6 +1355,7 @@ async def maintenance_middleware(request, handler):
 
 async def startup(app):
     await ensure_web_indexes()
+    await init_settings_store()
     missing = []
     if not DATABASE_URI:
         missing.append("DATABASE_URI")
