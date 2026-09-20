@@ -101,3 +101,13 @@ Browser limitation:
 - Native browser playback is used where possible. MKV/HEVC or other incompatible media can use the server-side compatibility endpoint, which is CPU-heavy and intentionally serialized on the default configuration.
 - Embedded track switching through the compatibility endpoint is a new browser-compatible stream, not a claim of native MKV track switching in every browser.
 - Real live Koyeb/Telegram/TMDB tests require the production environment variables and actual media records; this ZIP has been syntax-checked and the resolver/parser/player logic has been tested offline against representative filenames.
+
+## Ultron-style admin settings
+
+The admin panel now includes nested settings for verification/shorteners (1st/2nd/3rd), verification timing, tutorial links, file modes, result mode, max results, fuzzy fallback, search caching/concurrency controls, file security, auto-delete, captions, force-sub/log channels, welcome behavior, and poster/metadata fallback.
+
+These website controls are stored outside the AutoFilter MongoDB using `WEBSITE_SETTINGS_FILE` (default `/tmp/streambox_settings.json`). The existing AutoFilter database remains read-only.
+
+## Ultron-compatible admin controls
+
+The `/admin/` panel contains the nested settings tree from the supplied AutoFilter project. It includes the three shorteners, verification timing, three tutorials, file/shortlink modes, result mode, max results, file security, auto-delete, welcome, IMDb/poster options, log channel, force-sub list, caption, search/fuzzy/cache/concurrency controls, metadata fallback and maintenance controls. These settings are stored separately from the read-only AutoFilter MongoDB.
