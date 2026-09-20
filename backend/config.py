@@ -32,6 +32,8 @@ ADMIN_PASSWORD = _env("ADMIN_PASSWORD")
 ADMIN_PASSWORD_HASH = _env("ADMIN_PASSWORD_HASH")
 
 PUBLIC_URL = _env("PUBLIC_URL")
+TELEGRAM_BOT_USERNAME = _env("TELEGRAM_BOT_USERNAME").strip().lstrip("@")
+TELEGRAM_VERIFY_URL = _env("TELEGRAM_VERIFY_URL").strip()
 try:
     CATALOG_TTL = max(0, int(_env("CATALOG_TTL", "60")))
 except ValueError:
@@ -102,5 +104,5 @@ MANUAL_PAYMENT_INSTRUCTIONS = _env("MANUAL_PAYMENT_INSTRUCTIONS", "Pay using the
 MANUAL_PAYMENT_QR = _env("MANUAL_PAYMENT_QR", "")
 # Website state uses the same configured DATABASE_URI / DATABASE_NAME as the
 # media source, but only writes to dedicated website collections.
-WEBSITE_SETTINGS_COLLECTION = _env("WEBSITE_SETTINGS_COLLECTION", "streambox_settings").strip()
-WEBSITE_CATALOG_COLLECTION = _env("WEBSITE_CATALOG_COLLECTION", "streambox_catalog_index").strip()
+WEBSITE_SETTINGS_COLLECTION = _env("WEBSITE_SETTINGS_COLLECTION", "vyra_settings").strip()
+WEBSITE_CATALOG_COLLECTION = _env("WEBSITE_CATALOG_COLLECTION", "vyra_catalog_index").strip()
