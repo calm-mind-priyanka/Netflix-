@@ -1,8 +1,9 @@
 """Ultron-compatible website settings.
 
 This module mirrors the important settings keys used by the supplied Ultron
-AutoFilter project, but stores them outside the AutoFilter MongoDB.  The
-website never writes to the bot's media database.
+AutoFilter project. Website settings are stored in a dedicated MongoDB
+collection using the existing website MongoDB configuration; the AutoFilter
+media collection is never written to.
 """
 from __future__ import annotations
 
@@ -39,7 +40,7 @@ DEFAULT_SETTINGS = {
         "fuzzy_fallback": True,
         "external_correction": True,
         "spell_check": True,
-        "candidate_limit": 120,
+        "candidate_limit": 60,
         "search_cache_ttl": 30,
         "search_cache_max": 256,
         "search_concurrency": 3,
@@ -95,6 +96,7 @@ SECRET_PATHS = {
 LOCK = asyncio.Lock()
 PATH = Path(os.getenv("WEBSITE_SETTINGS_FILE", "/tmp/streambox_settings.json"))
 STATE = None
+MONGO_SETTINGS_READY = False
 
 
 def _merge(default, value):
@@ -123,6 +125,28 @@ def _load_sync():
     _sync_ultron_aliases(STATE)
     return deepcopy(STATE)
 
+
+async def init_settings_store():
+    """Load persistent website settings from the existing MongoDB database.
+
+    The AutoFilter media collection is never written. A separate website
+    collection stores the admin settings. A legacy /tmp settings file is only
+    used once as a migration source if Mongo has no settings yet.
+    """
+    global STATE, MONGO_SETTINGS_READY
+    from .web_store import ensure_indexes, load_settings_document, save_settings_document
+    await ensure_indexes()
+    async with LOCK:
+        doc = await load_settings_document()
+        if doc and isinstance(doc.get("settings"), dict):
+            STATE = _merge(DEFAULT_SETTINGS, doc["settings"])
+        else:
+            STATE = _load_sync()
+            await save_settings_document(STATE)
+        _sync_ultron_aliases(STATE)
+        _validate(STATE)
+        MONGO_SETTINGS_READY = True
+        return deepcopy(STATE)
 
 def _write_sync(state):
     PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -250,7 +274,8 @@ async def update_settings(patch):
         current = _merge(current, patch or {})
         _sync_ultron_aliases(current)
         _validate(current)
-        _write_sync(current)
+        from .web_store import save_settings_document
+        await save_settings_document(current)
         STATE = current
         return deepcopy(STATE)
 
@@ -275,7 +300,8 @@ async def remove_setting(path):
             obj[leaf] = deepcopy(default_value)
         _sync_ultron_aliases(current)
         _validate(current)
-        _write_sync(current)
+        from .web_store import save_settings_document
+        await save_settings_document(current)
         STATE = current
         return deepcopy(current)
 
@@ -285,7 +311,8 @@ async def reset_settings():
     async with LOCK:
         STATE = deepcopy(DEFAULT_SETTINGS)
         _sync_ultron_aliases(STATE)
-        _write_sync(STATE)
+        from .web_store import save_settings_document
+        await save_settings_document(STATE)
         return deepcopy(STATE)
 
 
