@@ -1,67 +1,14 @@
-let maintenance=false;
-
-async function req(url,options={}){
-  const response=await fetch(url,{credentials:"same-origin",...options});
-  if(response.status===401){
-    location.href="/admin";
-    return null;
-  }
-  const data=await response.json().catch(()=>({}));
-  if(!response.ok)throw new Error(data.error||data.message||"Request failed");
-  return data;
-}
-
-async function load(){
-  const data=await req("/admin/api/status");
-  if(!data)return;
-
-  maintenance=Boolean(data.maintenance);
-  document.getElementById("titles").textContent=data.titles;
-  document.getElementById("movies").textContent=data.movies;
-  document.getElementById("series").textContent=data.series;
-  document.getElementById("state").textContent=maintenance
-    ?"Website is OFFLINE — maintenance mode is ON."
-    :"Website is ONLINE.";
-  document.getElementById("toggle").textContent=maintenance
-    ?"Turn website ON"
-    :"Put website in maintenance";
-}
-
-document.getElementById("toggle").onclick=async()=>{
-  const button=document.getElementById("toggle");
-  button.disabled=true;
-  try{
-    await req("/admin/api/maintenance",{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({maintenance:!maintenance})
-    });
-    await load();
-  }catch(error){
-    alert(error.message);
-  }finally{
-    button.disabled=false;
-  }
-};
-
-document.getElementById("refresh").onclick=async()=>{
-  const button=document.getElementById("refresh");
-  button.disabled=true;
-  try{
-    await req("/admin/api/refresh",{method:"POST"});
-    await load();
-  }catch(error){
-    alert(error.message);
-  }finally{
-    button.disabled=false;
-  }
-};
-
-document.getElementById("logout").onclick=async()=>{
-  try{await req("/admin/logout",{method:"POST"})}
-  finally{location.href="/admin"}
-};
-
-load().catch(error=>{
-  document.getElementById("state").textContent=error.message;
-});
+let maintenance=false;let settings={};
+async function req(url,options={}){const response=await fetch(url,{credentials:"same-origin",...options});if(response.status===401){location.href="/admin";return null}const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||data.message||"Request failed");return data}
+function get(obj,path){return path.split('.').reduce((v,k)=>v==null?undefined:v[k],obj)}
+function set(obj,path,value){const keys=path.split('.');let cur=obj;keys.forEach((k,i)=>{if(i===keys.length-1)cur[k]=value;else cur=cur[k]||(cur[k]={})})}
+function syncInputs(){document.querySelectorAll('[data-path]').forEach(el=>{let v=get(settings,el.dataset.path);if(el.dataset.path==='files.fsub_channels'&&Array.isArray(v))v=v.join('\n');if(el.dataset.secret){el.value='';return}if(el.type==='checkbox')el.checked=Boolean(v);else el.value=v==null?'':v});const legacy=document.getElementById('legacyPreview');if(legacy)legacy.textContent=JSON.stringify(settings.ultron||{},null,2)}
+function collect(){const out=JSON.parse(JSON.stringify(settings));document.querySelectorAll('[data-path]').forEach(el=>{if(el.dataset.secret && !el.value.trim())return;let v;if(el.type==='checkbox')v=el.checked;else if(el.type==='number')v=Number(el.value||0);else v=el.value;if(el.dataset.path==='files.fsub_channels')v=String(v).split(/[\n,]+/).map(x=>x.trim()).filter(Boolean);set(out,el.dataset.path,v)});return out}
+async function load(){const [status,conf]=await Promise.all([req('/admin/api/status'),req('/admin/api/settings')]);if(!status||!conf)return;maintenance=Boolean(status.maintenance);settings=conf.settings;document.getElementById('titles').textContent=status.titles;document.getElementById('movies').textContent=status.movies;document.getElementById('series').textContent=status.series;document.getElementById('state').textContent=maintenance?'Website is OFFLINE — maintenance mode is ON.':'Website is ONLINE.';document.getElementById('toggle').textContent=maintenance?'Turn website ON':'Put website in maintenance';syncInputs()}
+document.getElementById('toggle').onclick=async()=>{const b=document.getElementById('toggle');b.disabled=true;try{await req('/admin/api/maintenance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({maintenance:!maintenance})});await load()}catch(e){alert(e.message)}finally{b.disabled=false}}
+document.getElementById('refresh').onclick=async()=>{const b=document.getElementById('refresh');b.disabled=true;try{await req('/admin/api/refresh',{method:'POST'});await load()}catch(e){alert(e.message)}finally{b.disabled=false}}
+document.getElementById('save').onclick=async()=>{const b=document.getElementById('save');b.disabled=true;try{settings=collect();const data=await req('/admin/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({settings})});settings=data.settings;syncInputs();document.getElementById('saveState').textContent='All settings saved successfully.';setTimeout(()=>document.getElementById('saveState').textContent='',3000)}catch(e){alert(e.message)}finally{b.disabled=false}}
+document.getElementById('reset').onclick=async()=>{if(!confirm('Reset ALL website/Ultron-compatible settings to defaults?'))return;const b=document.getElementById('reset');b.disabled=true;try{const data=await req('/admin/api/settings/reset',{method:'POST'});settings=data.settings;syncInputs();document.getElementById('saveState').textContent='Settings reset.'}catch(e){alert(e.message)}finally{b.disabled=false}}
+document.querySelectorAll('.remove-setting').forEach(btn=>btn.onclick=async()=>{const path=btn.dataset.remove;if(!confirm('Remove this setting and restore its default?'))return;try{const data=await req('/admin/api/settings/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});settings=data.settings;syncInputs();document.getElementById('saveState').textContent='Setting removed.'}catch(e){alert(e.message)}})
+document.getElementById('logout').onclick=async()=>{try{await req('/admin/logout',{method:'POST'})}finally{location.href='/admin'}}
+load().catch(e=>{document.getElementById('state').textContent=e.message})
