@@ -718,3 +718,36 @@ async function startExperience(){
 }
 
 startExperience();
+
+// Premium plans: automatic checkout activates immediately; manual mode requires payment proof approval.
+async function loadPremiumPlan(){
+  const statusEl=document.getElementById('premiumStatus'), plansEl=document.getElementById('premiumPlans');
+  if(!statusEl||!plansEl)return;
+  try{
+    const r=await fetch('/api/premium',{credentials:'same-origin'}), d=await r.json();
+    if(d.premium){statusEl.textContent='Premium active • '+(d.plan_name||d.plan)+' • expires '+new Date(d.expires_at*1000).toLocaleString(); plansEl.innerHTML=''; return;}
+    statusEl.textContent='Choose a plan. Automatic payment activates immediately; manual payment requires admin approval.';
+    plansEl.innerHTML=(d.plans||[]).map(p=>`<div class="premiumPlan"><b>${p.name}</b><span>₹${p.price_inr}</span><small>${p.days} days</small><button class="primary planBuy" data-plan="${p.id}">Choose Plan</button></div>`).join('');
+    plansEl.querySelectorAll('.planBuy').forEach(btn=>btn.onclick=()=>startPremium(btn.dataset.plan,d));
+    const manual=document.getElementById('manualPremium');
+    if(d.provider==='manual'||d.provider==='both'){
+      manual.classList.remove('hidden'); document.getElementById('manualInstructions').textContent=d.manual_instructions||'';
+      const qr=document.getElementById('manualQr'); if(d.manual_qr){qr.src=d.manual_qr;qr.classList.remove('hidden');}
+      manual.dataset.plan=(d.plans&&d.plans[0]&&d.plans[0].id)||'30day';
+    }
+  }catch(e){statusEl.textContent='Premium status unavailable.';}
+}
+async function startPremium(planId,d){
+  if(d.provider==='manual'||d.provider==='both'){
+    const manual=document.getElementById('manualPremium'); manual.classList.remove('hidden'); manual.dataset.plan=planId; manual.scrollIntoView({behavior:'smooth',block:'center'}); return;
+  }
+  try{
+    const r=await fetch('/api/premium/order',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({plan_id:planId})}); const o=await r.json();
+    if(!o.ok){alert(o.error||'Checkout is not configured.');return;}
+    if(!window.Razorpay){alert('Automatic payment provider is not configured.');return;}
+    new Razorpay({key:o.key_id,amount:o.amount,currency:o.currency,name:'StreamBox',description:`${o.plan_name} Premium`,order_id:o.order_id,handler:async resp=>{const vr=await fetch('/api/premium/verify',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(resp)});const v=await vr.json();if(v.ok)loadPremiumPlan();else alert(v.error||'Payment verification failed.');}}).open();
+  }catch(e){alert('Premium checkout failed.');}
+}
+const manualSubmit=document.getElementById('premiumManualSubmit');
+if(manualSubmit)manualSubmit.onclick=async()=>{const f=document.getElementById('premiumProof').files[0], state=document.getElementById('premiumManualState'), manual=document.getElementById('manualPremium');if(!f){state.textContent='Upload the payment screenshot first.';return;}const fd=new FormData();fd.append('plan_id',manual.dataset.plan||'30day');fd.append('proof',f);fd.append('note',document.getElementById('premiumNote').value||'');manualSubmit.disabled=true;state.textContent='Sending proof…';try{const r=await fetch('/api/premium/manual',{method:'POST',credentials:'same-origin',body:fd});const d=await r.json();state.textContent=d.ok?'Proof sent. Premium will activate after admin approval.':(d.error||'Submission failed.');}catch(e){state.textContent='Submission failed.';}finally{manualSubmit.disabled=false;}};
+window.addEventListener('load',loadPremiumPlan);
