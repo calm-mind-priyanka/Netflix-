@@ -37,6 +37,8 @@ def main():
         assert parsed["season"] == season
         assert parsed["episode"] == episode
 
+    # Stage 1 is always the first gate. Later stages activate only when their
+    # corresponding shortener is enabled in the persisted/admin settings.
     assert required_stage(0, 0, 100) == 1
 
 
