@@ -32,7 +32,7 @@ STREAM_CONCURRENCY = getattr(_config, "STREAM_CONCURRENCY", 4)
 STREAM_CHUNK_TIMEOUT = getattr(_config, "STREAM_CHUNK_TIMEOUT", 45)
 from .database import find_media
 
-LOGGER = logging.getLogger("streambox.stream")
+LOGGER = logging.getLogger("vyra.stream")
 
 CHUNK_SIZE = 1024 * 1024
 
