@@ -196,7 +196,27 @@ class UltronSearchEngine:
                 item["search_quality"] = parsed.get("quality")
                 ranked.append((score, item))
             ranked.sort(key=lambda pair: (-pair[0], pair[1].get("title", "").casefold()))
-            result = [item for score, item in ranked if score >= 0.55][:max_results]
+            result = []
+            seen_ids = set()
+            for score, item in ranked:
+                if score < 0.55:
+                    continue
+                item = dict(item)
+                # Search responses are intentionally lightweight. Do NOT send
+                # every season/episode/file variant to the browser. The full
+                # logical title is loaded only after the user opens a result.
+                item.pop("seasons", None)
+                item.pop("variants", None)
+                item.pop("assets", None)
+                item.pop("episodes", None)
+                item.pop("media", None)
+                key_id = item.get("id")
+                if key_id in seen_ids:
+                    continue
+                seen_ids.add(key_id)
+                result.append(item)
+                if len(result) >= max_results:
+                    break
             return result
 
         task = asyncio.create_task(work())
