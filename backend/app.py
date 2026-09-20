@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+import secrets
 from collections import OrderedDict
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from .config import (
     telegram_ready,
 )
 from .admin_settings import get_settings as get_admin_settings, get_public_settings, get_value as get_admin_setting, update_settings as update_admin_settings, reset_settings as reset_admin_settings, remove_setting as remove_admin_setting
+from .premium import status as premium_status, create_order as premium_create_order, verify_payment as premium_verify_payment, webhook as premium_webhook, admin_grant as premium_admin_grant, get_status as get_premium_status, manual_submit as premium_manual_submit, my_manual as premium_my_manual, admin_manual_list as premium_admin_manual_list, admin_manual_proof as premium_admin_manual_proof, admin_manual_decide as premium_admin_manual_decide
 from .database import (
     collection_counts,
     find_media,
@@ -60,6 +62,7 @@ from .parser import (
     _CatalogBuilder,
 )
 from .stream import Streamer, create_client
+from .ultron_search import UltronSearchEngine
 
 LOGGER = logging.getLogger("streambox")
 BASE = Path(__file__).resolve().parent.parent
@@ -86,6 +89,9 @@ SEARCH_SEMAPHORE = asyncio.Semaphore(3)
 SEARCH_CANDIDATE_LIMIT = min(max(120, int(os.getenv("SEARCH_CANDIDATE_LIMIT", "250"))), 500)
 HOME_CACHE = None
 HOME_CACHE_TIME = 0.0
+ULTRON_SEARCH = UltronSearchEngine()
+ULTRON_SEARCH_CONCURRENCY = 3
+VERIFY_STATE = {}
 
 # Keep homepage catalog work bounded. The website only needs enough recent
 # media records to build the visible homepage; it must never materialize the
@@ -167,7 +173,7 @@ def _tmdb_image_url(path, size):
 
 
 async def tmdb_meta(title, kind, year=None):
-    if not TMDB_API_KEY:
+    if not TMDB_API_KEY or not bool(get_admin_setting("metadata", "tmdb_enabled", default=True)):
         return {}
 
     key = (kind, title.casefold(), year)
@@ -461,38 +467,53 @@ async def search(request):
     if not query:
         return web.json_response({"ok": True, "items": [], "count": 0})
 
-    key = re.sub(r"\s+", " ", query).strip().casefold()
-    now = time.time()
-    cached = SEARCH_CACHE.get(key)
-    if cached and now - cached[0] < int(get_admin_setting("search", "search_cache_ttl", default=SEARCH_CACHE_TTL)):
-        SEARCH_CACHE.move_to_end(key)
-        items = cached[1][:max(1, int(get_admin_setting("search", "max_results", default=10)))]
-        return web.json_response({"ok": True, "items": items, "count": len(items), "cached": True})
+    # Apply the live Admin settings on every request.  This means changing
+    # fuzzy/correction/cache/concurrency/max-results in the panel immediately
+    # changes the real search engine instead of merely changing a UI field.
+    max_results = max(1, int(get_admin_setting("search", "max_results", default=10)))
+    candidate_limit = max(20, min(500, int(get_admin_setting("search", "candidate_limit", default=120))))
+    fuzzy = bool(get_admin_setting("search", "fuzzy_fallback", default=True)) and bool(get_admin_setting("search", "spell_check", default=True))
+    external = bool(get_admin_setting("search", "external_correction", default=True))
+    ttl = max(1, int(get_admin_setting("search", "search_cache_ttl", default=30)))
+    global ULTRON_SEARCH_CONCURRENCY
+    desired_concurrency = max(1, min(16, int(get_admin_setting("search", "search_concurrency", default=3))))
+    if desired_concurrency != ULTRON_SEARCH_CONCURRENCY:
+        ULTRON_SEARCH_CONCURRENCY = desired_concurrency
+        ULTRON_SEARCH.semaphore = asyncio.Semaphore(desired_concurrency)
 
-    # Single-flight: 100 users asking for the same title at once share one
-    # database search instead of creating 100 identical MongoDB scans.
-    task = SEARCH_INFLIGHT.get(key)
-    if task is None:
-        task = asyncio.create_task(_search_uncached(query))
-        SEARCH_INFLIGHT[key] = task
-    try:
-        selected = await task
-    finally:
-        if SEARCH_INFLIGHT.get(key) is task:
-            SEARCH_INFLIGHT.pop(key, None)
+    # Keep the engine cache policy aligned with the Admin panel.
+    key = ULTRON_SEARCH._key(query)
+    cached = ULTRON_SEARCH.cache.get(key)
+    if cached and time.time() - cached[0] < ttl:
+        ULTRON_SEARCH.cache.move_to_end(key)
+        return web.json_response({"ok": True, "items": cached[1][:max_results], "count": min(len(cached[1]), max_results), "cached": True})
 
-    # Ultron's max-results setting controls the visible result page. Keep the
-    # logical matching/grouping work above bounded, then cap only the response.
-    selected = selected[:max(1, int(get_admin_setting("search", "max_results", default=10)))]
+    selected, cached_flag = await ULTRON_SEARCH.search(
+        query,
+        candidate_limit=candidate_limit,
+        max_results=max_results,
+        fuzzy=fuzzy,
+        external_correction=external,
+    )
 
-    # Never cache an empty search result. A transient DB/network condition must
-    # not turn into a sticky false "0 results" response.
+    # Search is catalog-first, so external metadata is never on the critical
+    # path.  Enrich at most the first two visible results and fail soft.
+    if selected and bool(get_admin_setting("metadata", "tmdb_enabled", default=True)) and TMDB_API_KEY:
+        targets = [i for i, item in enumerate(selected) if not item.get("poster")][:2]
+        if targets and bool(get_admin_setting("metadata", "poster_fallback", default=True)):
+            values = await asyncio.gather(*(enrich(selected[i]) for i in targets), return_exceptions=True)
+            for i, value in zip(targets, values):
+                if not isinstance(value, Exception):
+                    selected[i] = value
+
+    # Never cache a no-result caused by a transient DB/network failure.
     if selected:
-        SEARCH_CACHE[key] = (time.time(), selected)
-        SEARCH_CACHE.move_to_end(key)
-        while len(SEARCH_CACHE) > int(get_admin_setting("search", "search_cache_max", default=SEARCH_CACHE_MAX)):
-            SEARCH_CACHE.popitem(last=False)
-    return web.json_response({"ok": True, "items": selected, "count": len(selected)})
+        ULTRON_SEARCH.cache[key] = (time.time(), selected)
+        ULTRON_SEARCH.cache.move_to_end(key)
+        cache_max = max(16, int(get_admin_setting("search", "search_cache_max", default=256)))
+        while len(ULTRON_SEARCH.cache) > cache_max:
+            ULTRON_SEARCH.cache.popitem(last=False)
+    return web.json_response({"ok": True, "items": selected[:max_results], "count": min(len(selected), max_results), "cached": cached_flag})
 
 
 async def _cached_or_search_items(query):
@@ -891,12 +912,105 @@ async def resolve(request):
     return web.json_response({"ok": True, "file": candidates[0]})
 
 
+async def _make_shortlink(url, stage):
+    """Use the configured Ultron-compatible Shortzy provider when available.
+
+    The website keeps this separate from the AutoFilter media database. If a
+    provider is unavailable, the local verification URL is returned instead
+    of breaking playback.
+    """
+    try:
+        from shortzy import Shortzy
+    except Exception:
+        return url
+    v = get_admin_settings().get("verification", {})
+    item = (v.get("shorteners") or {}).get(str(stage), {})
+    site = str(item.get("name") or "").strip()
+    api = str(item.get("api") or "").strip()
+    if not site or not api:
+        return url
+    try:
+        shortener = Shortzy(api, site)
+        try:
+            return await asyncio.wait_for(shortener.convert(url), timeout=4)
+        except Exception:
+            return await asyncio.wait_for(shortener.get_quick_link(url), timeout=4)
+    except Exception as exc:
+        LOGGER.warning("Shortener %s failed; using local verification URL: %s", stage, exc)
+        return url
+
+
+def _verification_stage(cookie_value):
+    if not cookie_value:
+        return 0, 0
+    state = VERIFY_STATE.get(cookie_value)
+    if not state:
+        return 0, 0
+    if state["expires"] < time.time():
+        VERIFY_STATE.pop(cookie_value, None)
+        return 0, 0
+    return int(state.get("stage", 0)), float(state.get("verified_at", 0))
+
+
+async def _verification_requirement(request, file_id):
+    settings = get_admin_settings().get("verification", {})
+    if not bool(settings.get("enabled", False)):
+        return None
+    cookie = request.cookies.get("stream_verify", "")
+    stage, verified_at = _verification_stage(cookie)
+    now = time.time()
+    required = 1
+    if stage >= 1 and int(settings.get("verification_time_2", 0) or 0) > 0:
+        if now - verified_at >= int(settings["verification_time_2"]):
+            required = 2
+    if stage >= 2 and int(settings.get("verification_time_3", 0) or 0) > 0:
+        if now - verified_at >= int(settings["verification_time_3"]):
+            required = 3
+    if stage >= required:
+        return None
+
+    code = secrets.token_urlsafe(24)
+    VERIFY_STATE[code] = {"file_id": str(file_id), "stage": required, "verified_at": 0, "expires": now + 900}
+    local = str(request.url.with_path("/api/verify").with_query(code=code))
+    link = await _make_shortlink(local, required)
+    tutorial = str(settings.get(f"tutorial_{required}") or settings.get("tutorial_1") or "").strip()
+    return {"verification_required": True, "verification_url": link, "tutorial_url": tutorial, "stage": required}
+
+
+async def verify_stream(request):
+    code = request.query.get("code", "").strip()
+    state = VERIFY_STATE.get(code)
+    if not state or state.get("expires", 0) < time.time():
+        raise web.HTTPBadRequest(text="Verification link expired. Please request a new link.")
+    VERIFY_STATE[code] = {**state, "verified_at": time.time()}
+    response = web.Response(text="Verification successful. Return to the player and press Play again.", content_type="text/html")
+    response.set_cookie("stream_verify", code, httponly=True, secure=request.secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https", samesite="Lax", max_age=900, path="/")
+    return response
+
+
+async def admin_shortener_test(request):
+    require_admin(request)
+    data = await request.json()
+    stage = str(data.get("stage", "1"))
+    if stage not in {"1", "2", "3"}:
+        raise web.HTTPBadRequest(text="stage must be 1, 2, or 3")
+    target = str(data.get("url") or PUBLIC_URL or "").strip()
+    if not target:
+        raise web.HTTPBadRequest(text="A test URL is required")
+    result = await _make_shortlink(target, int(stage))
+    return web.json_response({"ok": True, "stage": int(stage), "input": target, "shortlink": result})
+
+
 async def token(request):
     file_id = request.match_info["file_id"]
     doc = await find_media(file_id, projection={"_id": 1})
     if doc is None:
         raise web.HTTPNotFound(text="Media not found in Auto Filter Bot database")
-    return web.json_response({"ok": True, "token": make_stream_token(file_id)})
+    requirement = None if await _premium_active(request) else await _verification_requirement(request, file_id)
+    if requirement:
+        return web.json_response({"ok": False, **requirement}, status=403)
+    ttl = int(get_admin_setting("files", "auto_delete_seconds", default=300)) if bool(get_admin_setting("files", "auto_delete", default=False)) else None
+    return web.json_response({"ok": True, "token": make_stream_token(file_id, ttl=ttl)})
 
 
 async def stream(request):
@@ -943,8 +1057,25 @@ async def stream_compatible(request):
     return await streamer.transcode(request, file_id)
 
 
+async def _premium_active(request):
+    try:
+        uid=request.cookies.get("sb_user","")
+        return bool((await get_premium_status(uid)).get("premium"))
+    except Exception:
+        return False
+
 async def download(request):
+    """Protected direct download endpoint.
+
+    Download is intentionally gated through the same verification/shortlink
+    flow as playback.  A user cannot bypass an enabled ad/verification gate
+    merely by constructing /api/download/<file_id> directly.
+    """
     file_id = request.match_info["file_id"]
+    requirement = None if await _premium_active(request) else await _verification_requirement(request, file_id)
+    if requirement:
+        return web.json_response({"ok": False, **requirement, "download_blocked": True}, status=403)
+
     token_value = request.query.get("token", "")
     if not validate_stream_token(token_value, file_id):
         raise web.HTTPForbidden(text="Invalid or expired download token")
@@ -952,6 +1083,19 @@ async def download(request):
     if streamer is None:
         raise web.HTTPServiceUnavailable(text="Telegram streaming is not available")
     return await streamer.stream(request, file_id, attachment=True)
+
+
+async def download_policy(request):
+    settings = get_admin_settings()
+    verification = settings.get("verification", {})
+    return web.json_response({
+        "ok": True,
+        "download_requires_verification": bool(verification.get("enabled", False)),
+        "shortlink_mode": str(verification.get("shortlink_mode", "enabled")),
+        "file_mode": str(verification.get("file_mode", "file")),
+        "file_mode_type": str(verification.get("file_mode_type", "single")),
+        "premium_bypasses_verification": True,
+    }, headers={"Cache-Control": "no-store"})
 
 
 async def health(request):
@@ -1000,6 +1144,7 @@ async def admin_settings_update(request):
     SEARCH_CACHE.clear()
     GROUP_CACHE.clear()
     META_CACHE.clear()
+    ULTRON_SEARCH.cache.clear()
     return web.json_response({"ok": True, "settings": settings}, headers={"Cache-Control": "no-store"})
 
 
@@ -1014,6 +1159,7 @@ async def admin_settings_remove(request):
     SEARCH_CACHE.clear()
     GROUP_CACHE.clear()
     META_CACHE.clear()
+    ULTRON_SEARCH.cache.clear()
     return web.json_response({"ok": True, "settings": get_public_settings()}, headers={"Cache-Control": "no-store"})
 
 
@@ -1023,6 +1169,7 @@ async def admin_settings_reset(request):
     SEARCH_CACHE.clear()
     GROUP_CACHE.clear()
     META_CACHE.clear()
+    ULTRON_SEARCH.cache.clear()
     return web.json_response({"ok": True, "settings": settings}, headers={"Cache-Control": "no-store"})
 
 
@@ -1275,6 +1422,14 @@ def create_app():
     app.router.add_get("/api/filter", filter_media)
     app.router.add_get("/api/resolve", resolve)
     app.router.add_get("/api/stream-token/{file_id}", token)
+    app.router.add_get("/api/download-policy", download_policy)
+    app.router.add_get("/api/premium", premium_status)
+    app.router.add_post("/api/premium/order", premium_create_order)
+    app.router.add_post("/api/premium/verify", premium_verify_payment)
+    app.router.add_post("/api/premium/manual", premium_manual_submit)
+    app.router.add_get("/api/premium/manual", premium_my_manual)
+    app.router.add_post("/api/premium/webhook", premium_webhook)
+    app.router.add_get("/api/verify", verify_stream)
     app.router.add_get("/api/stream/{file_id}", stream)
     app.router.add_get("/api/tracks/{file_id}", tracks)
     app.router.add_get("/api/subtitle/{file_id}", subtitle)
@@ -1287,10 +1442,15 @@ def create_app():
     app.router.add_get("/admin/api/status", admin_status)
     app.router.add_post("/admin/api/maintenance", admin_toggle_maintenance)
     app.router.add_post("/admin/api/refresh", admin_refresh)
+    app.router.add_post("/admin/api/shortener/test", admin_shortener_test)
     app.router.add_get("/admin/api/settings", admin_settings_get)
     app.router.add_put("/admin/api/settings", admin_settings_update)
     app.router.add_post("/admin/api/settings/reset", admin_settings_reset)
     app.router.add_post("/admin/api/settings/remove", admin_settings_remove)
+    app.router.add_post("/admin/api/premium/grant", premium_admin_grant)
+    app.router.add_get("/admin/api/premium/manual", premium_admin_manual_list)
+    app.router.add_get("/admin/api/premium/manual/{request_id}/proof", premium_admin_manual_proof)
+    app.router.add_post("/admin/api/premium/manual/decide", premium_admin_manual_decide)
 
     async def frontend_index(request):
         return web.FileResponse(BASE / "frontend" / "index.html")
