@@ -32,8 +32,6 @@ from .config import (
     SITE_SECRET,
     HOST,
     TMDB_API_KEY,
-    TELEGRAM_BOT_USERNAME,
-    TELEGRAM_VERIFY_URL,
     TMDB_CACHE_MAX,
     telegram_ready,
 )
@@ -93,7 +91,6 @@ HOME_CACHE = None
 HOME_CACHE_TIME = 0.0
 ULTRON_SEARCH = UltronSearchEngine()
 ULTRON_SEARCH_CONCURRENCY = 3
-VERIFY_STATE = {}
 from .web_store import ensure_indexes as ensure_web_indexes, get_catalog_identity
 from .verification import requirement as verification_requirement, status as verification_status, complete as verification_complete
 
