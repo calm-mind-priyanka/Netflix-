@@ -32,8 +32,6 @@ ADMIN_PASSWORD = _env("ADMIN_PASSWORD")
 ADMIN_PASSWORD_HASH = _env("ADMIN_PASSWORD_HASH")
 
 PUBLIC_URL = _env("PUBLIC_URL")
-TELEGRAM_BOT_USERNAME = _env("TELEGRAM_BOT_USERNAME").strip().lstrip("@")
-TELEGRAM_VERIFY_URL = _env("TELEGRAM_VERIFY_URL").strip()
 try:
     CATALOG_TTL = max(0, int(_env("CATALOG_TTL", "60")))
 except ValueError:
