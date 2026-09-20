@@ -34,6 +34,7 @@ from .config import (
     TMDB_CACHE_MAX,
     telegram_ready,
 )
+from .admin_settings import get_settings as get_admin_settings, get_public_settings, get_value as get_admin_setting, update_settings as update_admin_settings, reset_settings as reset_admin_settings, remove_setting as remove_admin_setting
 from .database import (
     collection_counts,
     find_media,
@@ -100,7 +101,7 @@ TITLE_VARIANT_LIMIT = min(max(300, int(SEARCH_MAX_DOCS)), 1500)
 
 # Maintenance is deliberately kept in memory. The website must not create or
 # modify a collection inside the Auto Filter Bot's MongoDB database.
-MAINTENANCE = False
+MAINTENANCE = bool(get_admin_setting("site", "maintenance", default=False))
 
 
 async def all_titles(limit=None):
@@ -349,14 +350,15 @@ async def _raw_autofilter_files(query, limit=None):
     prepared = _autofilter_prepare_query(query)
     if not prepared:
         return []
-    bounded = SEARCH_CANDIDATE_LIMIT if limit is None else min(max(1, int(limit)), 1500)
+    bounded = int(get_admin_setting("search", "candidate_limit", default=SEARCH_CANDIDATE_LIMIT)) if limit is None else min(max(1, int(limit)), 1500)
     async with SEARCH_SEMAPHORE:
         docs = await search_media(prepared, limit=bounded)
         if not docs:
             parsed_query = normalize_query(prepared)
             title = parsed_query.get("title") or prepared
             docs = await search_media(title, limit=bounded)
-            if not docs and parsed_query.get("year") is None:
+            if (not docs and parsed_query.get("year") is None and
+                bool(get_admin_setting("search", "fuzzy_fallback", default=True))):
                 docs = await fuzzy_search_media(title, limit=min(40, bounded))
         return await asyncio.to_thread(_parsed_files, docs)
 
@@ -382,11 +384,12 @@ async def _search_uncached(query):
     base_query = " ".join(base_parts).strip()
 
     async with SEARCH_SEMAPHORE:
-        docs = await search_media(base_query, limit=SEARCH_CANDIDATE_LIMIT)
+        docs = await search_media(base_query, limit=int(get_admin_setting("search", "candidate_limit", default=SEARCH_CANDIDATE_LIMIT)))
         if not docs and search_title.casefold() != base_query.casefold():
-            docs = await search_media(search_title, limit=SEARCH_CANDIDATE_LIMIT)
-        if not docs and parsed.get("year") is None:
-            fuzzy_docs = await fuzzy_search_media(search_title, limit=min(40, SEARCH_CANDIDATE_LIMIT))
+            docs = await search_media(search_title, limit=int(get_admin_setting("search", "candidate_limit", default=SEARCH_CANDIDATE_LIMIT)))
+        if (not docs and parsed.get("year") is None and
+            bool(get_admin_setting("search", "fuzzy_fallback", default=True))):
+            fuzzy_docs = await fuzzy_search_media(search_title, limit=min(40, int(get_admin_setting("search", "candidate_limit", default=SEARCH_CANDIDATE_LIMIT))))
             if fuzzy_docs:
                 fuzzy_parsed = parse_doc(fuzzy_docs[0])
                 corrected_title = fuzzy_parsed.get("title") or search_title
@@ -461,9 +464,10 @@ async def search(request):
     key = re.sub(r"\s+", " ", query).strip().casefold()
     now = time.time()
     cached = SEARCH_CACHE.get(key)
-    if cached and now - cached[0] < SEARCH_CACHE_TTL:
+    if cached and now - cached[0] < int(get_admin_setting("search", "search_cache_ttl", default=SEARCH_CACHE_TTL)):
         SEARCH_CACHE.move_to_end(key)
-        return web.json_response({"ok": True, "items": cached[1], "count": len(cached[1]), "cached": True})
+        items = cached[1][:max(1, int(get_admin_setting("search", "max_results", default=10)))]
+        return web.json_response({"ok": True, "items": items, "count": len(items), "cached": True})
 
     # Single-flight: 100 users asking for the same title at once share one
     # database search instead of creating 100 identical MongoDB scans.
@@ -477,12 +481,16 @@ async def search(request):
         if SEARCH_INFLIGHT.get(key) is task:
             SEARCH_INFLIGHT.pop(key, None)
 
+    # Ultron's max-results setting controls the visible result page. Keep the
+    # logical matching/grouping work above bounded, then cap only the response.
+    selected = selected[:max(1, int(get_admin_setting("search", "max_results", default=10)))]
+
     # Never cache an empty search result. A transient DB/network condition must
     # not turn into a sticky false "0 results" response.
     if selected:
         SEARCH_CACHE[key] = (time.time(), selected)
         SEARCH_CACHE.move_to_end(key)
-        while len(SEARCH_CACHE) > SEARCH_CACHE_MAX:
+        while len(SEARCH_CACHE) > int(get_admin_setting("search", "search_cache_max", default=SEARCH_CACHE_MAX)):
             SEARCH_CACHE.popitem(last=False)
     return web.json_response({"ok": True, "items": selected, "count": len(selected)})
 
@@ -491,7 +499,7 @@ async def _cached_or_search_items(query):
     """Reuse a recent grouped search result for title/resolve requests."""
     key = re.sub(r"\s+", " ", str(query)).strip().casefold()
     cached = SEARCH_CACHE.get(key)
-    if cached and time.time() - cached[0] < SEARCH_CACHE_TTL:
+    if cached and time.time() - cached[0] < int(get_admin_setting("search", "search_cache_ttl", default=SEARCH_CACHE_TTL)):
         SEARCH_CACHE.move_to_end(key)
         return cached[1]
     task = SEARCH_INFLIGHT.get(key)
@@ -506,7 +514,7 @@ async def _cached_or_search_items(query):
     if result:
         SEARCH_CACHE[key] = (time.time(), result)
         SEARCH_CACHE.move_to_end(key)
-        while len(SEARCH_CACHE) > SEARCH_CACHE_MAX:
+        while len(SEARCH_CACHE) > int(get_admin_setting("search", "search_cache_max", default=SEARCH_CACHE_MAX)):
             SEARCH_CACHE.popitem(last=False)
     return result
 
@@ -957,6 +965,67 @@ def _set_status(request, name, configured):
     }
 
 
+async def admin_settings_get(request):
+    require_admin(request)
+    return web.json_response({"ok": True, "settings": get_public_settings()}, headers={"Cache-Control": "no-store"})
+
+
+async def admin_settings_update(request):
+    require_admin(request)
+    try:
+        data = await request.json()
+    except Exception as exc:
+        raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+    if not isinstance(data, dict):
+        raise web.HTTPBadRequest(text="Settings must be an object")
+    patch = data.get("settings", data)
+    # Secret API fields are write-only. A blank/null API leaves the existing secret unchanged.
+    if isinstance(patch, dict):
+        verification = patch.get("verification")
+        if isinstance(verification, dict) and isinstance(verification.get("shorteners"), dict):
+            current = get_admin_settings().get("verification", {}).get("shorteners", {})
+            for num in ("1", "2", "3"):
+                item = verification["shorteners"].get(num)
+                if isinstance(item, dict) and not item.get("api"):
+                    old = current.get(num, {}).get("api", "")
+                    item.pop("api", None)
+                    if old:
+                        item["api"] = old
+        settings_patch = patch
+    else:
+        settings_patch = {}
+    settings = await update_admin_settings(settings_patch)
+    # Settings are process-local controls; invalidate derived search/metadata caches
+    # so the next request observes the new admin configuration.
+    SEARCH_CACHE.clear()
+    GROUP_CACHE.clear()
+    META_CACHE.clear()
+    return web.json_response({"ok": True, "settings": settings}, headers={"Cache-Control": "no-store"})
+
+
+async def admin_settings_remove(request):
+    require_admin(request)
+    data = await request.json()
+    path = str(data.get("path", "")).strip()
+    allowed_prefixes = ("verification.", "search.", "files.", "metadata.", "site.", "ultron.")
+    if not path or not path.startswith(allowed_prefixes):
+        raise web.HTTPBadRequest(text="Invalid settings path")
+    settings = await remove_admin_setting(path)
+    SEARCH_CACHE.clear()
+    GROUP_CACHE.clear()
+    META_CACHE.clear()
+    return web.json_response({"ok": True, "settings": get_public_settings()}, headers={"Cache-Control": "no-store"})
+
+
+async def admin_settings_reset(request):
+    require_admin(request)
+    settings = await reset_admin_settings()
+    SEARCH_CACHE.clear()
+    GROUP_CACHE.clear()
+    META_CACHE.clear()
+    return web.json_response({"ok": True, "settings": settings}, headers={"Cache-Control": "no-store"})
+
+
 async def diagnostics(request):
     require_admin(request)
 
@@ -1051,7 +1120,7 @@ async def admin_status(request):
     return web.json_response(
         {
             "authenticated": True,
-            "maintenance": MAINTENANCE,
+            "maintenance": bool(get_admin_setting("site", "maintenance", default=MAINTENANCE)),
             "titles": len(items),
             "movies": sum(item["type"] == "movie" for item in items),
             "series": sum(item["type"] == "series" for item in items),
@@ -1072,6 +1141,7 @@ async def admin_toggle_maintenance(request):
         raise web.HTTPBadRequest(text="Invalid JSON body") from exc
 
     MAINTENANCE = bool(data.get("maintenance"))
+    await update_admin_settings({"site": {"maintenance": MAINTENANCE}})
     return web.json_response(
         {"ok": True, "maintenance": MAINTENANCE},
         headers={"Cache-Control": "no-store"},
@@ -1217,6 +1287,10 @@ def create_app():
     app.router.add_get("/admin/api/status", admin_status)
     app.router.add_post("/admin/api/maintenance", admin_toggle_maintenance)
     app.router.add_post("/admin/api/refresh", admin_refresh)
+    app.router.add_get("/admin/api/settings", admin_settings_get)
+    app.router.add_put("/admin/api/settings", admin_settings_update)
+    app.router.add_post("/admin/api/settings/reset", admin_settings_reset)
+    app.router.add_post("/admin/api/settings/remove", admin_settings_remove)
 
     async def frontend_index(request):
         return web.FileResponse(BASE / "frontend" / "index.html")
