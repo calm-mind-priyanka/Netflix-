@@ -11,6 +11,7 @@ const Player={
    await video.play().catch(()=>{});
   }catch(e){
    if(e.status===403 && e.data?.verification_required){retryFn?.(e.data);return}
+   if(e.status===403 && e.data?.download_blocked){throw new Error('Verification is required before download.')}
    throw e;
   }
  },
