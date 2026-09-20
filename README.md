@@ -1,6 +1,6 @@
 # VYRA
 
-VYRA is a lightweight web client for an existing Telegram AutoFilter media database. It is intentionally **not** a Netflix clone. The UI is text-first, fast, and designed for low CPU/RAM use on Koyeb Free.
+VYRA is a lightweight web client for an existing Telegram AutoFilter media database. It is intentionally a lightweight AutoFilter-style site. The UI is text-first, fast, and designed for low CPU/RAM use on Koyeb Free.
 
 ## Architecture
 
@@ -46,4 +46,4 @@ The app listens on `0.0.0.0` and `$PORT`. `/health` is lightweight. Search uses 
 
 ## Environment
 
-Copy `.env.example` to `.env` or configure the same variables in Koyeb. Keep the existing AutoFilter Mongo URI/database/collection variables. Set a long random `SITE_SECRET`. Configure Telegram credentials only when playback/download is required.
+Copy `.env.example` to `.env` or configure the same variables in Koyeb. Keep the existing AutoFilter Mongo URI/database/collection variables. Set a long random `SITE_SECRET`. Configure Telegram credentials only when playback/download is required; website verification itself does not require Telegram.
