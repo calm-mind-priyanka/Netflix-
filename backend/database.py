@@ -232,8 +232,9 @@ async def search_media(query, limit=None):
             docs.append(doc)
             if len(docs) >= bounded:
                 break
-        if len(docs) >= bounded:
-            break
+        # Do not stop after Primary: the user's second AutoFilter database may
+        # contain a title that does not exist in the first database. Both are
+        # searched concurrently and merged up to the same hard response cap.
     if succeeded == 0:
         raise RuntimeError("All configured MongoDB databases are unreachable or the collection cannot be searched (" + ", ".join(errors) + ")")
     return docs
@@ -367,8 +368,6 @@ async def search_media_with_filters(query, *, season=None, episode=None,
             docs.append(doc)
             if len(docs) >= bounded:
                 break
-        if len(docs) >= bounded:
-            break
     if succeeded == 0:
         raise RuntimeError("All configured MongoDB databases are unreachable or the collection cannot be searched (" + ", ".join(errors) + ")")
     return docs
