@@ -169,7 +169,7 @@ const Player={
       el.style.cssText="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:5;background:#111;padding:20px;border:1px solid #444;border-radius:14px;max-width:min(92vw,520px);text-align:center;color:#fff;box-shadow:0 12px 50px rgba(0,0,0,.55)";
       document.getElementById("player").appendChild(el);
     }
-    el.innerHTML=`<strong>Verification ${stage||1} required</strong><p>Please complete verification to continue playback.</p><p><a href="${url}" target="_blank" rel="noopener" style="display:inline-block;padding:10px 16px;border-radius:9px;background:#fff;color:#000;text-decoration:none;font-weight:700">Verify & Continue</a> ${tutorial||""}</p><small>After verification, return here and press Play again.</small>`;
+    el.innerHTML=`<strong>Verification ${stage||1} required</strong><p>Please complete verification to continue playback.</p><p><a href="${url}" target="_blank" rel="noopener" style="display:inline-block;padding:10px 16px;border-radius:9px;background:#fff;color:#000;text-decoration:none;font-weight:700">Verify & Continue</a> ${tutorial||""}</p><small>Complete verification, return here, then press <b>Play</b> again. This page will not start playback until verification succeeds.</small>`;
   },
 
   async loadTracks(variant){
@@ -178,7 +178,10 @@ const Player={
       if(!token?.token)return;
       const data=await API.get("/api/tracks/"+encodeURIComponent(variant.file_id)+"?token="+encodeURIComponent(token.token));
       if(data?.available)this.tracks=data;
-    }catch(_){}
+    }catch(e){
+      if(e?.code === "VERIFICATION_REQUIRED") return;
+      this.showError(e?.message || "Unable to load audio/subtitle tracks.");
+    }
   },
 
   findVariantFor(key,value){
