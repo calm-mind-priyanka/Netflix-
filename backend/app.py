@@ -94,7 +94,8 @@ HOME_CACHE_TIME = 0.0
 ULTRON_SEARCH = UltronSearchEngine()
 ULTRON_SEARCH_CONCURRENCY = 3
 VERIFY_STATE = {}
-from .web_store import verification_tokens, ensure_indexes as ensure_web_indexes, get_catalog_identity
+from .web_store import ensure_indexes as ensure_web_indexes, get_catalog_identity
+from .verification import requirement as verification_requirement, status as verification_status, complete as verification_complete
 
 # Keep homepage catalog work bounded. The website only needs enough recent
 # media records to build the visible homepage; it must never materialize the
@@ -267,29 +268,16 @@ async def home(request):
 
 
 async def access_status(request):
+    state = await verification_status(request)
     uid = request.cookies.get("vyra_user", "")
     premium = await get_premium_status(uid)
-    settings = get_admin_settings().get("verification", {})
-    code = request.cookies.get("vyra_verify", "")
-    stage, verified_at = await _verification_stage(code)
-    valid = bool(code and verified_at and stage >= 1)
-    now = time.time()
-    if valid and int(settings.get("verification_time_2", 0) or 0) > 0 and now - verified_at >= int(settings["verification_time_2"]):
-        valid = stage >= 2
-    if valid and int(settings.get("verification_time_3", 0) or 0) > 0 and now - verified_at >= int(settings["verification_time_3"]):
-        valid = stage >= 3
     response = web.json_response({
         "ok": True,
-        "verification_enabled": bool(settings.get("enabled", False)),
-        "verified": bool(valid),
-        "verification_stage": int(stage),
-        "verified_at": verified_at,
+        **state,
         "premium": bool(premium.get("premium")),
         "expires_at": int(premium.get("expires_at", 0) or 0),
     })
     if not uid:
-        # Create the normal website identity lazily when the browser asks for
-        # access state; premium orders use the same persistent cookie.
         from .premium import ensure_user
         ensure_user(response)
     return response
@@ -949,77 +937,6 @@ async def resolve(request):
     return web.json_response({"ok": True, "file": candidates[0]})
 
 
-async def _make_shortlink(url, stage):
-    """Use the configured Ultron-compatible Shortzy provider when available.
-
-    The website keeps this separate from the AutoFilter media database. If a
-    provider is unavailable, the local verification URL is returned instead
-    of breaking playback.
-    """
-    try:
-        from shortzy import Shortzy
-    except Exception:
-        return url
-    v = get_admin_settings().get("verification", {})
-    item = (v.get("shorteners") or {}).get(str(stage), {})
-    site = str(item.get("name") or "").strip()
-    api = str(item.get("api") or "").strip()
-    if not site or not api:
-        return url
-    try:
-        shortener = Shortzy(api, site)
-        try:
-            return await asyncio.wait_for(shortener.convert(url), timeout=4)
-        except Exception:
-            return await asyncio.wait_for(shortener.get_quick_link(url), timeout=4)
-    except Exception as exc:
-        LOGGER.warning("Shortener %s failed; using local verification URL: %s", stage, exc)
-        return url
-
-
-async def _verification_stage(cookie_value):
-    if not cookie_value or verification_tokens is None:
-        return 0, 0
-    await ensure_web_indexes()
-    await init_settings_store()
-    state = await verification_tokens.find_one({"code": cookie_value})
-    if not state or float(state.get("expires", 0)) < time.time():
-        return 0, 0
-    return int(state.get("stage", 0)), float(state.get("verified_at", 0))
-
-async def _verification_requirement(request, file_id):
-    settings = get_admin_settings().get("verification", {})
-    if not bool(settings.get("enabled", False)):
-        return None
-    cookie = request.cookies.get("vyra_verify", "")
-    stage, verified_at = await _verification_stage(cookie)
-    now = time.time(); required = 1
-    if stage >= 1 and int(settings.get("verification_time_2", 0) or 0) > 0 and now - verified_at >= int(settings["verification_time_2"]): required = 2
-    if stage >= 2 and int(settings.get("verification_time_3", 0) or 0) > 0 and now - verified_at >= int(settings["verification_time_3"]): required = 3
-    if stage >= required: return None
-    await ensure_web_indexes()
-    code = secrets.token_urlsafe(24)
-    await verification_tokens.insert_one({"code":code,"file_id":str(file_id),"stage":required,"verified_at":0,"expires":now+900,"created_at":now})
-    local = str(request.url.with_path("/api/verify").with_query(code=code))
-    link = await _make_shortlink(local, required)
-    tutorial = str(settings.get(f"tutorial_{required}") or settings.get("tutorial_1") or "").strip()
-    telegram_url = TELEGRAM_VERIFY_URL or (f"https://t.me/{TELEGRAM_BOT_USERNAME}" if TELEGRAM_BOT_USERNAME else "")
-    return {"verification_required":True,"verification_url":link,"tutorial_url":tutorial,"telegram_url":telegram_url,"stage":required}
-
-async def verify_stream(request):
-    code = request.query.get("code", "").strip()
-    await ensure_web_indexes()
-    state = await verification_tokens.find_one({"code":code}) if code else None
-    if not state or float(state.get("expires",0)) < time.time():
-        raise web.HTTPBadRequest(text="Verification link expired. Please request a new link.")
-    await verification_tokens.update_one({"code":code},{"$set":{"verified_at":time.time()}})
-    public_url = PUBLIC_URL.rstrip("/") if PUBLIC_URL else str(request.url.origin())
-    html = f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Verification complete</title><style>body{{font-family:system-ui;background:#080808;color:#fff;display:grid;place-items:center;min-height:100vh;margin:0}}main{{max-width:520px;text-align:center;padding:28px}}a{{display:inline-block;margin-top:18px;padding:12px 18px;border-radius:10px;background:#fff;color:#000;text-decoration:none;font-weight:700}}</style></head><body><main><h1>✓ Verification complete</h1><p>Verification is complete. Return to VYRA and press Play again.</p><a href="{public_url}/">Return to VYRA</a></main></body></html>'''
-    response = web.Response(text=html, content_type="text/html")
-    response.set_cookie("vyra_verify",code,httponly=True,secure=True,samesite="Lax",max_age=900,path="/")
-    return response
-
-
 async def admin_shortener_test(request):
     require_admin(request)
     data = await request.json()
@@ -1029,8 +946,13 @@ async def admin_shortener_test(request):
     target = str(data.get("url") or PUBLIC_URL or "").strip()
     if not target:
         raise web.HTTPBadRequest(text="A test URL is required")
-    result = await _make_shortlink(target, int(stage))
+    from .verification import _shorten
+    result = await _shorten(target, int(stage))
     return web.json_response({"ok": True, "stage": int(stage), "input": target, "shortlink": result})
+
+
+async def verify_stream(request):
+    return await verification_complete(request)
 
 
 async def token(request):
@@ -1038,7 +960,7 @@ async def token(request):
     doc = await find_media(file_id, projection={"_id": 1})
     if doc is None:
         raise web.HTTPNotFound(text="Media not found in Auto Filter Bot database")
-    requirement = None if await _premium_active(request) else await _verification_requirement(request, file_id)
+    requirement = None if await _premium_active(request) else await verification_requirement(request, file_id)
     if requirement:
         return web.json_response({"ok": False, **requirement}, status=403)
     ttl = int(get_admin_setting("files", "auto_delete_seconds", default=300)) if bool(get_admin_setting("files", "auto_delete", default=False)) else None
@@ -1104,7 +1026,7 @@ async def download(request):
     merely by constructing /api/download/<file_id> directly.
     """
     file_id = request.match_info["file_id"]
-    requirement = None if await _premium_active(request) else await _verification_requirement(request, file_id)
+    requirement = None if await _premium_active(request) else await verification_requirement(request, file_id)
     if requirement:
         return web.json_response({"ok": False, **requirement, "download_blocked": True}, status=403)
 
