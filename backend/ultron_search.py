@@ -23,7 +23,7 @@ from .database import search_media, fuzzy_search_media
 from .parser import _CatalogBuilder, normalize_query, normalize_for_search, parse_doc, search_title_score
 from .web_store import save_catalog_identity
 
-LOGGER = logging.getLogger("streambox.ultron_search")
+LOGGER = logging.getLogger("vyra.ultron_search")
 
 IGNORE_WORDS = [
     "movies", "movie", "episode", "episodes", "south indian", "south indian movie",
