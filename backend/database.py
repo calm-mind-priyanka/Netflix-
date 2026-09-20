@@ -10,7 +10,7 @@ from .config import (
     MULTIPLE_DB,
 )
 
-LOGGER = logging.getLogger("streambox.database")
+LOGGER = logging.getLogger("vyra.database")
 
 client = None
 db = None
