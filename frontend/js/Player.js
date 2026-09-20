@@ -150,9 +150,31 @@ const Player={
     document.querySelectorAll("[data-player-subtitle]").forEach(b=>b.onclick=()=>this.choose("subtitle",b.dataset.playerSubtitle));
   },
 
+  async getStreamToken(fileId){
+    const response=await fetch("/api/stream-token/"+encodeURIComponent(fileId),{credentials:"same-origin"});
+    let data=null; try{data=await response.json()}catch(_){data=null}
+    if(response.status===403 && data?.verification_required){
+      const tutorial=data.tutorial_url?`<a href="${data.tutorial_url}" target="_blank" rel="noopener">How to verify</a>`:"";
+      this.showVerification(data.verification_url,data.stage,tutorial);
+      const err=new Error("Verification required before playback."); err.code="VERIFICATION_REQUIRED"; throw err;
+    }
+    if(!response.ok)throw new Error(data?.error||"Unable to obtain stream token.");
+    return data;
+  },
+
+  showVerification(url,stage,tutorial){
+    let el=document.getElementById("playerVerification");
+    if(!el){
+      el=document.createElement("div"); el.id="playerVerification";
+      el.style.cssText="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:5;background:#111;padding:20px;border:1px solid #444;border-radius:14px;max-width:min(92vw,520px);text-align:center;color:#fff;box-shadow:0 12px 50px rgba(0,0,0,.55)";
+      document.getElementById("player").appendChild(el);
+    }
+    el.innerHTML=`<strong>Verification ${stage||1} required</strong><p>Please complete verification to continue playback.</p><p><a href="${url}" target="_blank" rel="noopener" style="display:inline-block;padding:10px 16px;border-radius:9px;background:#fff;color:#000;text-decoration:none;font-weight:700">Verify & Continue</a> ${tutorial||""}</p><small>After verification, return here and press Play again.</small>`;
+  },
+
   async loadTracks(variant){
     try{
-      const token=await API.get("/api/stream-token/"+encodeURIComponent(variant.file_id));
+      const token=await this.getStreamToken(variant.file_id);
       if(!token?.token)return;
       const data=await API.get("/api/tracks/"+encodeURIComponent(variant.file_id)+"?token="+encodeURIComponent(token.token));
       if(data?.available)this.tracks=data;
@@ -276,7 +298,7 @@ const Player={
 
   async switchEmbeddedAudio(track,position,playing){
     const v=this.variant;
-    const data=await API.get("/api/stream-token/"+encodeURIComponent(v.file_id));
+    const data=await this.getStreamToken(v.file_id);
     if(!data?.token)throw new Error("Server did not return a stream token.");
     const source="/api/stream-compatible/"+encodeURIComponent(v.file_id)+"?token="+encodeURIComponent(data.token)+"&audio_track="+encodeURIComponent(track)+"&start="+encodeURIComponent(position.toFixed(3));
     await this.loadSource(source,0,playing,v,true);
@@ -287,7 +309,7 @@ const Player={
     this.removeSubtitleTrack();
     const embedded=(this.tracks.subtitle_tracks||[]).find(t=>t.language===value);
     if(!embedded||!this.variant)throw new Error("That subtitle track is not available in this file.");
-    const data=await API.get("/api/stream-token/"+encodeURIComponent(this.variant.file_id));
+    const data=await this.getStreamToken(this.variant.file_id);
     if(!data?.token)throw new Error("Server did not return a stream token.");
     const url="/api/subtitle/"+encodeURIComponent(this.variant.file_id)+"?token="+encodeURIComponent(data.token)+"&subtitle_track="+encodeURIComponent(embedded.track);
     const response=await fetch(url);
@@ -302,7 +324,7 @@ const Player={
 
   async select(v,position=0,playing=false){
     if(!v?.file_id)throw new Error("This file has no valid media ID.");
-    const data=await API.get("/api/stream-token/"+encodeURIComponent(v.file_id));
+    const data=await this.getStreamToken(v.file_id);
     if(!data?.token)throw new Error("Server did not return a stream token.");
     const compatible=this.needsCompatibility(v);
     const endpoint=compatible?"/api/stream-compatible/":"/api/stream/";
@@ -363,8 +385,11 @@ const Player={
   },
   download(){
     if(!this.variant?.file_id){this.showError("No playable file is selected.");return}
-    API.get("/api/stream-token/"+encodeURIComponent(this.variant.file_id)).then(d=>{
-      if(!d.token)throw new Error("Server did not return a download token.");
+    this.getStreamToken(this.variant.file_id).then(d=>{
+      if(!d?.token){
+        if(d?.verification_url){ this.showVerification(d); return; }
+        throw new Error("Server did not return a download token.");
+      }
       location.href="/api/download/"+encodeURIComponent(this.variant.file_id)+"?token="+encodeURIComponent(d.token);
     }).catch(e=>this.showError(e.message||"Unable to start download."));
   },
