@@ -100,7 +100,7 @@ PREMIUM_PRICE_INR = min(v["price_inr"] for v in PREMIUM_PLANS.values())
 PREMIUM_DAYS = min(v["days"] for v in PREMIUM_PLANS.values())
 MANUAL_PAYMENT_INSTRUCTIONS = _env("MANUAL_PAYMENT_INSTRUCTIONS", "Pay using the configured UPI/bank method, then upload the payment screenshot for admin approval.")
 MANUAL_PAYMENT_QR = _env("MANUAL_PAYMENT_QR", "")
-PREMIUM_PROOF_DIR = _env("PREMIUM_PROOF_DIR", "/tmp/streambox_premium_proofs")
-PREMIUM_STORE_FILE = _env("PREMIUM_STORE_FILE", "/tmp/streambox_premium.json")
-WEBSITE_DATABASE_URI = _env("WEBSITE_DATABASE_URI").strip()
-WEBSITE_DATABASE_NAME = _env("WEBSITE_DATABASE_NAME", "streambox_users").strip()
+# Website state uses the same configured DATABASE_URI / DATABASE_NAME as the
+# media source, but only writes to dedicated website collections.
+WEBSITE_SETTINGS_COLLECTION = _env("WEBSITE_SETTINGS_COLLECTION", "streambox_settings").strip()
+WEBSITE_CATALOG_COLLECTION = _env("WEBSITE_CATALOG_COLLECTION", "streambox_catalog_index").strip()
