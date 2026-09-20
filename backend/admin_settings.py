@@ -11,7 +11,6 @@ import asyncio
 import json
 import os
 from copy import deepcopy
-from pathlib import Path
 from urllib.parse import urlparse
 
 DEFAULT_SETTINGS = {
@@ -38,7 +37,7 @@ DEFAULT_SETTINGS = {
         "result_mode": "buttons",
         "imdb_poster": False,
         "fuzzy_fallback": True,
-        "external_correction": True,
+        "external_correction": False,
         "spell_check": True,
         "candidate_limit": 60,
         "search_cache_ttl": 30,
@@ -55,7 +54,7 @@ DEFAULT_SETTINGS = {
         "welcome": False,
     },
     "metadata": {
-        "tmdb_enabled": True,
+        "tmdb_enabled": False,
         "poster_fallback": True,
     },
     "site": {
@@ -94,7 +93,6 @@ SECRET_PATHS = {
 }
 
 LOCK = asyncio.Lock()
-PATH = Path(os.getenv("WEBSITE_SETTINGS_FILE", "/tmp/streambox_settings.json"))
 STATE = None
 MONGO_SETTINGS_READY = False
 
@@ -112,26 +110,17 @@ def _merge(default, value):
 
 def _load_sync():
     global STATE
-    try:
-        if PATH.exists():
-            with PATH.open("r", encoding="utf-8") as handle:
-                raw = json.load(handle)
-        else:
-            raw = {}
-    except Exception:
-        raw = {}
-    STATE = _merge(DEFAULT_SETTINGS, raw)
-    # Upgrade old settings files that predate the flat Ultron compatibility map.
+    # Website settings are Mongo-backed only. There is no /tmp state path, so
+    # restarts and Koyeb instance replacement cannot silently lose settings.
+    STATE = _merge(DEFAULT_SETTINGS, {})
     _sync_ultron_aliases(STATE)
     return deepcopy(STATE)
-
 
 async def init_settings_store():
     """Load persistent website settings from the existing MongoDB database.
 
     The AutoFilter media collection is never written. A separate website
-    collection stores the admin settings. A legacy /tmp settings file is only
-    used once as a migration source if Mongo has no settings yet.
+    collection stores all admin settings; no local /tmp persistence is used.
     """
     global STATE, MONGO_SETTINGS_READY
     from .web_store import ensure_indexes, load_settings_document, save_settings_document
@@ -147,14 +136,6 @@ async def init_settings_store():
         _validate(STATE)
         MONGO_SETTINGS_READY = True
         return deepcopy(STATE)
-
-def _write_sync(state):
-    PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp = PATH.with_suffix(PATH.suffix + ".tmp")
-    with temp.open("w", encoding="utf-8") as handle:
-        json.dump(state, handle, indent=2, ensure_ascii=False)
-    temp.replace(PATH)
-
 
 def _sync_ultron_aliases(state):
     v = state["verification"]
