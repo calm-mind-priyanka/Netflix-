@@ -14,6 +14,22 @@ document.querySelectorAll('.remove-setting').forEach(btn=>btn.onclick=async()=>{
 document.getElementById('logout').onclick=async()=>{try{await req('/admin/logout',{method:'POST'})}finally{location.href='/admin'}}
 load().catch(e=>{document.getElementById('state').textContent=e.message})
 
+async function loadPremiumPending(){
+  const box=document.getElementById('premiumPending');
+  if(!box)return;
+  try{
+    const d=await req('/admin/api/premium/manual');
+    const rows=d.requests||[];
+    if(!rows.length){box.textContent='No pending manual payment requests.';return;}
+    box.innerHTML=rows.map(r=>`<div class="premiumRequest" style="border:1px solid #333;border-radius:10px;padding:12px;margin:8px 0"><b>${String(r.plan_name||r.plan_id)}</b> • ₹${String(r.amount||'')}<br><small>User: ${String(r.user_id||'')} • ${new Date((r.created_at||0)*1000).toLocaleString()}</small><br><a href="/admin/api/premium/manual/${encodeURIComponent(r.id)}/proof" target="_blank">View payment proof</a><br><button type="button" class="mini premiumApprove" data-id="${String(r.id)}">Approve</button> <button type="button" class="mini premiumReject" data-id="${String(r.id)}">Reject</button></div>`).join('');
+    box.querySelectorAll('.premiumApprove,.premiumReject').forEach(btn=>btn.onclick=async()=>{
+      btn.disabled=true;
+      try{await req('/admin/api/premium/manual/decide',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:btn.dataset.id,action:btn.classList.contains('premiumApprove')?'approve':'reject'})});await loadPremiumPending();}
+      catch(e){alert(e.message);btn.disabled=false;}
+    });
+  }catch(e){box.textContent='Unable to load pending payments: '+e.message;}
+}
+
 const premiumGrant=document.getElementById('premiumGrant');
 
 loadPremiumPending();
