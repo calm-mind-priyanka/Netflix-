@@ -133,3 +133,5 @@ main{padding-bottom:calc(78px + env(safe-area-inset-bottom))}
   padding:10px 12px;
   background:rgba(229,9,20,.06);
 }
+.premiumBox{margin:24px 0;padding:20px;border:1px solid rgba(255,255,255,.12);border-radius:16px;background:rgba(255,255,255,.04)}
+.premiumPlans{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:14px 0}.premiumPlan{display:flex;flex-direction:column;gap:7px;padding:16px;border:1px solid rgba(255,255,255,.12);border-radius:14px;background:rgba(255,255,255,.04)}.premiumPlan span{font-size:1.3rem;font-weight:700}.premiumPlan small{opacity:.7}.manualPremium{margin-top:18px;padding:16px;border-radius:14px;border:1px dashed rgba(255,255,255,.2)}.manualPremium label{display:block;margin:10px 0}.manualPremium input,.manualPremium textarea{width:100%;margin-top:6px}.manualQr{max-width:220px;display:block;margin:12px auto;border-radius:12px}
