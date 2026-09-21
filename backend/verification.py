@@ -95,9 +95,10 @@ async def _load_cookie_row(request):
 def required_stage(stage: int, verified_at: float, now: float | None = None) -> int:
     """Return the currently required stage in the active verification cycle.
 
-    The first enabled stage starts the cycle.  After a stage is completed, the
-    configured gap for the next enabled stage controls when that next stage is
-    required.  A zero gap means the next stage is available immediately.
+    The first enabled stage starts the cycle when its link is generated. After
+    a stage is completed, the configured gap for the next enabled stage controls
+    when that next stage is required. A zero gap means the next stage is available
+    immediately.
     """
     settings = _settings()
     now = now or time.time()
@@ -203,16 +204,22 @@ async def requirement(request: web.Request, file_id: str):
     user_id = user["user_id"] if user else ""
     issued = time.time()
 
-    # The master validity clock starts only when Stage 1 is actually
-    # completed.  Issuing a shortener link must never start the 24-hour clock.
-    # Once Stage 1 has been completed, the same cycle deadline is preserved
-    # while later stages are completed; Stage 2/3 never extend or restart it.
+    # The master 24-hour cycle starts when the FIRST Stage-1 shortener link is
+    # generated.  It is deliberately tied to link generation, not to the
+    # moment the user returns from the shortener.  Once started, the same
+    # deadline is preserved for every later stage and is never extended by
+    # Stage 2 or Stage 3.
     if row and float(row.get("cycle_expires_at", 0) or 0) > issued:
         cycle_expires = float(row.get("cycle_expires_at"))
         cycle_started = float(row.get("cycle_started_at", issued) or issued)
     else:
-        cycle_started = 0.0
-        cycle_expires = 0.0
+        cycle_started = issued
+        cycle_expires = _verification_expiry(issued)
+
+    # The generated shortener link and the master cycle share the same expiry.
+    # This means that after 24 hours the complete cycle naturally resets to
+    # Stage 1, even if Stage 2/3 were never completed.
+    pending_expires = cycle_expires
 
     await verification_tokens.insert_one({
         "code": code,
@@ -222,7 +229,7 @@ async def requirement(request: web.Request, file_id: str):
         "verified_at": 0,
         "verified": False,
         "issued_at": issued,
-        "expires": cycle_expires,
+        "expires": pending_expires,
         "cycle_started_at": cycle_started,
         "cycle_expires_at": cycle_expires,
         "used": False,
@@ -297,11 +304,11 @@ async def complete(request: web.Request):
     cycle_expires = float(row.get("cycle_expires_at", 0) or 0)
 
     if completed_stage == enabled[0]:
-        # Stage 1 completion starts the master verification cycle.  The 24-hour
-        # validity is measured from this moment, never from link issuance and
-        # never from completion of Stage 2/3.
-        cycle_started = now
-        cycle_expires = _verification_expiry(now)
+        # Stage 1 already started the master cycle when its shortener link was
+        # generated.  Never restart or extend that deadline when the user
+        # returns from the shortener.
+        if cycle_expires <= now:
+            raise web.HTTPBadRequest(text="This verification cycle expired. Please start verification again.")
     elif cycle_expires <= now:
         raise web.HTTPBadRequest(text="This verification cycle expired. Please start verification again.")
 
