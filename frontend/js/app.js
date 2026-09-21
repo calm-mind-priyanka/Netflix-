@@ -1305,18 +1305,35 @@ async function access(mode){
 }
 
 
+function formatVerificationDuration(seconds){
+  const value=Math.max(0,Number(seconds)||0);
+  if(value===0)return 'now';
+  if(value%86400===0){const n=value/86400;return `${n} day${n===1?'':'s'}`;}
+  if(value%3600===0){const n=value/3600;return `${n} hour${n===1?'':'s'}`;}
+  if(value%60===0){const n=value/60;return `${n} minute${n===1?'':'s'}`;}
+  return `${value} seconds`;
+}
+
+
 function openVerify(
   info,
   mode
 ){
 
+  const stage = Number(info.stage||1);
+  const shortenerName = info.shortener_name || `Shortener ${stage}`;
+  const gap = Number(info.stage_gap_seconds||0);
+  const gapText = gap > 0
+    ? `After you complete this step, you will be free for ${formatVerificationDuration(gap)} before the next enabled verification step.`
+    : `After you complete this step, the next enabled verification step will be available immediately.`;
+
   $('verifyText').textContent=
     info.verification_error||
-    `Verification is required before you can ${
+    `Verification Step ${stage} — ${shortenerName}. Please complete this step before you can ${
       mode==='download'
         ?'download'
         :'watch'
-    } this file.`;
+    } this file. ${gapText}`;
 
   $('verifyLink').href=
     info.verification_url||'#';
@@ -1337,9 +1354,7 @@ function openVerify(
   }
 
   $('verifyState').textContent=
-    `Complete verification, return here, then press “Check again”. Stage ${
-      info.stage||1
-    }.`;
+    `Complete Step ${stage} (${shortenerName}), return here, then press “Check again”.`;
 
   $('verifyRefresh').onclick=
     async()=>{
