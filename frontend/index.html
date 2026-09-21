@@ -9,7 +9,7 @@
 </head>
 <body>
 <div id="app" class="app hidden">
-<header class="topbar"><button class="wordmark" id="homeBtn">VYRA</button><div class="topActions"><button id="premiumBtn" class="topLink">Premium</button><button id="searchBtn" class="searchIcon" aria-label="Search">⌕</button></div></header>
+<header class="topbar"><button class="wordmark" id="homeBtn">VYRA</button><div class="topActions"><button id="accountBtn" class="topLink">Account</button><button id="premiumBtn" class="topLink">Premium</button><button id="searchBtn" class="searchIcon" aria-label="Search">⌕</button></div></header>
 <main id="main">
 <section class="welcome"><p class="eyebrow">FAST • SIMPLE • REAL FILES</p><h1>Find it. Pick it. <span>Play it.</span></h1><p>Search the AutoFilter catalog without the heavy OTT clutter.</p><div class="searchMini"><input id="homeQuery" placeholder="Search movie, series, season or episode…" autocomplete="off"><button id="homeSearch">Search</button></div></section>
 <section id="searchSection" class="section hidden"><div class="sectionHead"><div><p class="eyebrow">AUTOFILTER SEARCH</p><h2 id="resultTitle">Results</h2></div><button id="clearSearch" class="ghost">Clear</button></div><div id="results" class="textList"></div></section>
@@ -19,7 +19,7 @@
 <div class="split"><div><div class="sectionHead compact"><h2>Movies</h2></div><div id="movies" class="nameList"></div></div><div><div class="sectionHead compact"><h2>Web Series</h2></div><div id="series" class="nameList"></div></div></div>
 <div class="sectionHead compact"><h2>Categories</h2></div><div id="categories" class="categoryList"></div>
 </section>
-<section id="premiumSection" class="section premiumSection"><div class="sectionHead"><div><p class="eyebrow">ACCESS</p><h2>Premium</h2></div><span id="premiumBadge" class="badge">FREE</span></div><p id="premiumCopy">Premium can remove verification checks when enabled by the admin.</p><div id="premiumPlans" class="plans"></div><div id="manualPay" class="manual hidden"><p id="manualInstructions"></p><img id="manualQr" class="manualQr hidden" alt="Payment QR"><div class="upload"><label>Premium plan<select id="manualPlan"></select></label><label>Payment screenshot<input id="premiumProof" type="file" accept="image/png,image/jpeg,image/webp"></label><textarea id="premiumNote" placeholder="Optional note"></textarea><button id="manualSubmit">Submit proof</button></div><p id="manualState"></p><div id="manualHistory" class="manualHistory"></div></div></section>
+<section id="premiumSection" class="section premiumSection"><div class="sectionHead"><div><p class="eyebrow">ACCESS</p><h2>Premium</h2></div><span id="premiumBadge" class="badge">FREE</span></div><p id="premiumCopy">Premium can remove verification checks when enabled by the admin.</p><div id="premiumPlans" class="plans"></div><div id="manualPay" class="manual hidden"><div class="paymentBox"><strong>Manual UPI payment</strong><p id="manualInstructions"></p><p id="manualUpi" class="mono"></p><img id="manualQr" class="manualQr hidden" alt="Payment QR"></div><div class="upload"><label>Premium plan<select id="manualPlan"></select></label><label>UTR / Payment reference<input id="premiumUtr" maxlength="80" placeholder="Enter UTR/reference number"></label><label>Payment screenshot<input id="premiumProof" type="file" accept="image/png,image/jpeg,image/webp"></label><textarea id="premiumNote" placeholder="Optional note"></textarea><button id="manualSubmit">Submit proof</button></div><p id="manualState"></p><div id="manualHistory" class="manualHistory"></div></div></section>
 </main>
 <footer><span>VYRA</span><span>Light by design • Built for fast catalog search</span></footer>
 </div>
@@ -27,5 +27,32 @@
 <div id="verify" class="overlay hidden"><div class="modal"><button class="close" data-close="verify">×</button><p class="eyebrow">ACCESS CHECK</p><h2>Verification required</h2><p id="verifyText">Verification is required before this file can be opened.</p><div class="verifyActions"><a id="verifyLink" class="primary" target="_blank" rel="noopener">Start verification</a><a id="tutorialLink" class="secondary hidden" target="_blank" rel="noopener">How to verify</a><button id="verifyRefresh" class="secondary">Check again</button><button id="buyPremiumFromVerify" class="secondary">Buy Premium</button></div><p id="verifyState" class="muted"></p></div></div>
 <div id="playerLayer" class="overlay hidden"><div class="playerBox"><button class="close" id="playerClose">×</button><video id="video" controls playsinline preload="metadata"></video><p id="playerInfo" class="muted"></p></div></div>
 <div id="toast" class="toast"></div>
+<div id="accountGate" class="accountOverlay hidden" aria-modal="true" role="dialog">
+  <div class="accountModal">
+    <p class="eyebrow">VYRA ACCOUNT</p>
+    <h2 id="accountTitle">Create your account</h2>
+    <p id="accountSubtitle" class="muted">Create a simple website account. No phone number or social login is required.</p>
+    <div class="accountTabs"><button id="showCreateAccount" class="active">Create account</button><button id="showLoginAccount">Login</button></div>
+    <div id="createAccountBox">
+      <input id="accountNickname" maxlength="40" placeholder="Nickname / display name" autocomplete="nickname">
+      <button id="createAccountBtn" class="primary full">Create account</button>
+    </div>
+    <div id="loginAccountBox" class="hidden">
+      <input id="loginUserId" inputmode="numeric" maxlength="8" placeholder="8-digit User ID" autocomplete="username">
+      <input id="loginAccountKey" type="password" placeholder="Account Key" autocomplete="current-password">
+      <button id="loginAccountBtn" class="primary full">Login</button>
+    </div>
+    <div id="accountKeyBox" class="accountKeyBox hidden">
+      <strong>Save your Account Key</strong>
+      <p>Your 8-digit User ID is public. This separate Account Key is the credential used to log in again after logout.</p>
+      <p>Your permanent VYRA User ID:</p><code id="newAccountUserId"></code><button id="copyNewUserId" class="secondary full">Copy User ID</button><p>Account Key:</p><code id="newAccountKey"></code><button id="copyNewAccountKey" class="secondary full">Copy Account Key</button>
+      <button id="continueAccountBtn" class="primary full">I saved it — continue</button>
+    </div>
+    <p id="accountState" class="muted"></p>
+  </div>
+</div>
+
+<div id="accountPanel" class="overlay hidden"><div class="modal accountPanelModal"><button class="close" data-close="accountPanel">×</button><p class="eyebrow">MY ACCOUNT</p><h2>Account</h2><div class="profileGrid"><div><small>Nickname</small><strong id="profileNickname"></strong></div><div><small>VYRA User ID</small><strong class="copyId" id="profileUserId"></strong><button id="copyProfileUserId" class="secondary">Copy ID</button></div><div><small>Premium</small><strong id="profilePremium"></strong></div><div><small>Expires</small><strong id="profileExpiry"></strong></div></div><input id="profileNicknameInput" maxlength="40" placeholder="Update nickname"><button id="saveNickname">Save nickname</button><button id="logoutAccount" class="secondary">Logout</button></div></div>
+
 <script src="/js/api.js"></script><script src="/js/Player.js"></script><script src="/js/app.js"></script>
 </body></html>
