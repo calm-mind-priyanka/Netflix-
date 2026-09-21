@@ -45,3 +45,12 @@ This build integrates the applicable behavior from the supplied Ultron/AutoFilte
 
 ## Telegram-only settings
 Force-subscription membership checks, Telegram bot callback commands, Telegram message deletion, and Telegram `/start` verification are Telegram-runtime features. The website does not fake these as browser-native operations.
+
+## A-Z final pass
+- Search results now paginate independently of the retained search set.
+- Search cards expose Language / Quality / Season / Episode filters immediately, without requiring a separate detail-page step.
+- File-level Watch and Download actions remain attached to each filtered result.
+- Premium activation mode can be controlled from the admin settings (environment / automatic / manual).
+- Verification shortlink mode and premium verification bypass are admin-controlled and persisted.
+- File/metadata and payment settings are exposed in the admin dashboard and wired to the backend.
+- Admin login redirects authenticated admins directly to the dashboard.
