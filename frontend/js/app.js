@@ -1494,17 +1494,14 @@ async function loadPremium(){
             )
       );
 
-    if(
-      d.provider==='manual'||
-      d.provider==='both'
-    ){
+    const manualAllowed=(String(d.activation_mode||'environment')==='manual') || (String(d.activation_mode||'environment')==='environment' && (d.provider==='manual'||d.provider==='both') && d.manual_enabled !== false);
+
+    if(manualAllowed){
 
       show('manualPay');
 
-      $('manualInstructions')
-        .textContent=
-          d.manual_instructions||
-          'Pay using the configured UPI/bank method, then upload the payment screenshot for admin approval.';
+      $('manualInstructions').textContent=d.manual_instructions||'Pay using the configured UPI/QR, then submit the UTR/reference and screenshot for admin approval.';
+      $('manualUpi').textContent=d.upi_id ? `UPI ID: ${d.upi_id}` : 'UPI ID is not configured yet.';
 
       $('manualPlan').innerHTML=
         (d.plans||[])
@@ -1559,7 +1556,7 @@ async function buyPlan(
 
   if(
     mode==='manual'||
-    d.provider==='manual'
+    (mode==='environment' && (d.provider==='manual'||d.provider==='both') && d.manual_enabled !== false)
   ){
 
     const sel=
@@ -1752,12 +1749,8 @@ async function loadManualHistory(){
             </span>
 
             <small>
-              ${esc(
-                String(
-                  r.status||
-                  'pending'
-                ).toUpperCase()
-              )}
+              ${esc(String(r.status||'pending').toUpperCase())}
+              ${r.utr ? ` • UTR: ${esc(r.utr)}` : ''}
             </small>
 
           </div>
@@ -1811,10 +1804,9 @@ $('manualSubmit').onclick=
       f
     );
 
-    fd.append(
-      'plan_id',
-      plan
-    );
+    fd.append('plan_id', plan);
+
+    fd.append('utr', utr);
 
     fd.append(
       'note',
@@ -1870,6 +1862,7 @@ $('manualSubmit').onclick=
       );
 
       $('premiumProof').value='';
+      $('premiumUtr').value='';
       $('premiumNote').value='';
 
       await loadManualHistory();
@@ -1897,6 +1890,148 @@ $('manualSubmit').onclick=
     }
   };
 
+
+
+/* =========================
+   WEBSITE ACCOUNT
+   ========================= */
+
+let accountData = null;
+
+function accountGate(showGate=true){
+  if(showGate) show('accountGate');
+  else hide('accountGate');
+}
+
+function setAccountMode(mode){
+  const create = mode === 'create';
+  $('showCreateAccount')?.classList.toggle('active', create);
+  $('showLoginAccount')?.classList.toggle('active', !create);
+  $('createAccountBox')?.classList.toggle('hidden', !create);
+  $('loginAccountBox')?.classList.toggle('hidden', create);
+  $('accountKeyBox')?.classList.add('hidden');
+  $('accountTitle').textContent = create ? 'Create your account' : 'Login to your account';
+  $('accountSubtitle').textContent = create
+    ? 'Create a simple website account. No phone number or social login is required.'
+    : 'Use your permanent 8-digit User ID and the separate Account Key you received when the account was created.';
+  $('accountState').textContent = '';
+}
+
+function renderAccountPanel(data){
+  accountData = data;
+  if(!data?.authenticated){
+    $('accountBtn').textContent = 'Account';
+    return;
+  }
+  const u=data.user||{};
+  const p=data.premium||{};
+  $('accountBtn').textContent = u.nickname ? u.nickname.slice(0,16) : 'Account';
+  $('profileNickname').textContent = u.nickname || '';
+  $('profileUserId').textContent = u.user_id || '';
+  $('profileNicknameInput').value = u.nickname || '';
+  $('profilePremium').textContent = p.premium ? `ACTIVE • ${p.plan_name||p.plan||''}` : 'INACTIVE';
+  $('profileExpiry').textContent = p.expires_at ? new Date(p.expires_at*1000).toLocaleString() : '—';
+}
+
+async function bootstrapAccount(){
+  try{
+    const d=await API.get('/api/account/me');
+    if(d.authenticated){
+      renderAccountPanel(d);
+      accountGate(false);
+      show('app');
+      await loadPremium();
+      return true;
+    }
+    hide('app');
+    accountGate(true);
+    setAccountMode('create');
+    return false;
+  }catch(e){
+    hide('app');
+    accountGate(true);
+    $('accountState').textContent='Account service is unavailable. Please try again.';
+    return false;
+  }
+}
+
+$('showCreateAccount').onclick=()=>setAccountMode('create');
+$('showLoginAccount').onclick=()=>setAccountMode('login');
+
+$('createAccountBtn').onclick=async()=>{
+  const button=$('createAccountBtn');
+  const nickname=$('accountNickname').value.trim();
+  if(nickname.length<2){$('accountState').textContent='Enter a nickname with at least 2 characters.';return;}
+  button.disabled=true; button.textContent='Creating…'; $('accountState').textContent='Creating your permanent website account…';
+  try{
+    const d=await API.post('/api/account/create',{nickname});
+    $('newAccountKey').textContent=d.account_key;
+    $('newAccountUserId').textContent=d.user.user_id;
+    $('accountState').textContent=`Account created. User ID: ${d.user.user_id}`;
+    $('accountKeyBox').classList.remove('hidden');
+    $('createAccountBox').classList.add('hidden');
+    $('loginAccountBox').classList.add('hidden');
+  }catch(e){$('accountState').textContent=e.message;}finally{button.disabled=false;button.textContent='Create account';}
+};
+
+
+async function copyText(value){
+  try{ await navigator.clipboard.writeText(String(value||'')); toast('Copied.'); }
+  catch(_){ toast('Copy failed. Long-press the value to copy it.'); }
+}
+$('copyNewUserId').onclick=()=>copyText($('newAccountUserId').textContent);
+$('copyNewAccountKey').onclick=()=>copyText($('newAccountKey').textContent);
+$('copyProfileUserId').onclick=()=>copyText($('profileUserId').textContent);
+
+$('continueAccountBtn').onclick=async()=>{
+  accountGate(false);
+  show('app');
+  await bootstrapAccount();
+  loadHome();
+};
+
+$('loginAccountBtn').onclick=async()=>{
+  const button=$('loginAccountBtn');
+  const user_id=$('loginUserId').value.trim();
+  const account_key=$('loginAccountKey').value.trim();
+  if(!/^\d{8}$/.test(user_id)||!account_key){$('accountState').textContent='Enter the 8-digit User ID and Account Key.';return;}
+  button.disabled=true; button.textContent='Logging in…'; $('accountState').textContent='';
+  try{
+    const d=await API.post('/api/account/login',{user_id,account_key});
+    await bootstrapAccount();
+    toast(`Welcome back, ${d.user.nickname}`);
+    loadHome();
+  }catch(e){$('accountState').textContent=e.message;}finally{button.disabled=false;button.textContent='Login';}
+};
+
+$('accountBtn').onclick=async()=>{
+  const d=await API.get('/api/account/me');
+  if(!d.authenticated){accountGate(true);setAccountMode('login');return;}
+  renderAccountPanel(d);show('accountPanel');
+};
+
+$('saveNickname').onclick=async()=>{
+  const nickname=$('profileNicknameInput').value.trim();
+  try{
+    const d=await API.request('/api/account/nickname',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({nickname})});
+    $('profileNickname').textContent=d.nickname;
+    $('accountBtn').textContent=d.nickname.slice(0,16);
+    toast('Nickname updated.');
+  }catch(e){toast(e.message);}
+};
+
+$('logoutAccount').onclick=async()=>{
+  try{
+    await API.post('/api/account/logout',{});
+    hide('accountPanel');
+    hide('app');
+    accountGate(true);
+    setAccountMode('login');
+    $('loginUserId').value='';
+    $('loginAccountKey').value='';
+    toast('Logged out.');
+  }catch(e){toast(e.message);}
+};
 
 /* =========================
    MAIN CONTROLS
@@ -1955,15 +2090,12 @@ document
         )
   );
 
-$('app')
-  .classList
-  .remove('hidden');
-
 $('playerClose').onclick=
   ()=>Player.close();
 
-
 (async()=>{
-  loadHome();
-  loadPremium();
+  const authenticated=await bootstrapAccount();
+  if(authenticated){
+    loadHome();
+  }
 })();
