@@ -882,3 +882,19 @@ footer{
   background:#10345a;
   border-color:var(--blue)
 }
+
+/* Website account / payment additions */
+.accountOverlay{position:fixed;inset:0;z-index:1000;background:rgba(3,8,15,.88);backdrop-filter:blur(10px);display:grid;place-items:center;padding:18px}
+.accountModal{width:min(460px,100%);background:var(--panel,#0c1b2b);border:1px solid rgba(255,255,255,.12);border-radius:20px;padding:24px;box-shadow:0 25px 80px rgba(0,0,0,.45)}
+.accountTabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:18px 0}
+.accountTabs button{padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.1);background:transparent;color:inherit}
+.accountTabs button.active{background:rgba(255,255,255,.1)}
+.accountModal input,.accountPanelModal input{width:100%;box-sizing:border-box;margin:7px 0;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(0,0,0,.2);color:inherit}
+.full{width:100%;margin-top:8px}
+.accountKeyBox{margin-top:16px;padding:14px;border:1px solid rgba(255,255,255,.12);border-radius:12px}
+.accountKeyBox code{display:block;word-break:break-all;padding:12px;margin:10px 0;background:rgba(0,0,0,.3);border-radius:9px}
+.accountPanelModal{max-width:520px}
+.profileGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0}
+.profileGrid>div{padding:12px;border:1px solid rgba(255,255,255,.08);border-radius:10px}
+.profileGrid small,.profileGrid strong{display:block}.profileGrid small{opacity:.6;margin-bottom:5px}.profileGrid strong{word-break:break-word}
+.paymentBox{padding:14px;border:1px solid rgba(255,255,255,.1);border-radius:12px;margin-bottom:14px}.mono{font-family:ui-monospace,monospace;word-break:break-all}
