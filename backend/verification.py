@@ -203,15 +203,16 @@ async def requirement(request: web.Request, file_id: str):
     user_id = user["user_id"] if user else ""
     issued = time.time()
 
-    # Partial cycles get one fixed deadline.  Completing a later stage does not
-    # silently extend the unfinished cycle.  If the user reaches the final
-    # enabled stage, that completion starts the normal full validity window.
+    # The master validity clock starts only when Stage 1 is actually
+    # completed.  Issuing a shortener link must never start the 24-hour clock.
+    # Once Stage 1 has been completed, the same cycle deadline is preserved
+    # while later stages are completed; Stage 2/3 never extend or restart it.
     if row and float(row.get("cycle_expires_at", 0) or 0) > issued:
         cycle_expires = float(row.get("cycle_expires_at"))
         cycle_started = float(row.get("cycle_started_at", issued) or issued)
     else:
-        cycle_started = issued
-        cycle_expires = _verification_expiry(issued)
+        cycle_started = 0.0
+        cycle_expires = 0.0
 
     await verification_tokens.insert_one({
         "code": code,
@@ -292,16 +293,20 @@ async def complete(request: web.Request):
 
     position = enabled.index(completed_stage)
     is_final = position == len(enabled) - 1
-    cycle_started = float(row.get("cycle_started_at", row.get("issued_at", now)) or now)
-    cycle_expires = float(row.get("cycle_expires_at", row.get("expires", now)) or now)
+    cycle_started = float(row.get("cycle_started_at", 0) or 0)
+    cycle_expires = float(row.get("cycle_expires_at", 0) or 0)
 
-    if is_final:
-        # The full verification period begins when the complete cycle finishes.
-        expires = now + _validity_hours(settings) * 3600
-    else:
-        expires = cycle_expires
-        if expires <= now:
-            raise web.HTTPBadRequest(text="This verification cycle expired. Please start verification again.")
+    if completed_stage == enabled[0]:
+        # Stage 1 completion starts the master verification cycle.  The 24-hour
+        # validity is measured from this moment, never from link issuance and
+        # never from completion of Stage 2/3.
+        cycle_started = now
+        cycle_expires = _verification_expiry(now)
+    elif cycle_expires <= now:
+        raise web.HTTPBadRequest(text="This verification cycle expired. Please start verification again.")
+
+    # Every later stage keeps the original Stage-1 deadline.
+    expires = cycle_expires
 
     result = await verification_tokens.update_one(
         {"code": code, "used": {"$ne": True}},
@@ -320,29 +325,23 @@ async def complete(request: web.Request):
 
     base = _base_url(request)
     next_stage = enabled[position + 1] if not is_final else 0
-    completed_name = _stage_label(completed_stage, settings)
-
     if is_final:
         title = "✓ Verification completed"
         message = (
             f"All {len(enabled)} verification step{'s' if len(enabled) != 1 else ''} are complete. "
-            f"You are verified for {_validity_hours(settings)} hours."
+            f"Your verification cycle is valid for {_validity_hours(settings)} hours from Step 1 completion."
         )
         detail = "You can now return to VYRA and press Watch again."
     else:
         gap = _stage_gap(settings, next_stage)
-        next_name = _stage_label(next_stage, settings)
         title = f"✓ Step {completed_stage} completed"
         if gap > 0:
             message = (
-                f"{completed_name} verification is complete. You are free for {_format_duration(gap)}. "
-                f"After that, Step {next_stage} ({next_name}) will be required."
+                f"Step {completed_stage} is complete. The next verification step will be required "
+                f"after {_format_duration(gap)}."
             )
         else:
-            message = (
-                f"{completed_name} verification is complete. "
-                f"Step {next_stage} ({next_name}) is ready now."
-            )
+            message = "Step {0} is complete. The next verification step is available now.".format(completed_stage)
         detail = "Return to VYRA and press Watch again when you are ready to continue."
 
     html = f"""<!doctype html>
