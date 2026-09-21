@@ -1360,10 +1360,15 @@ async def maintenance_middleware(request, handler):
                 },
                 status=503,
             )
+        # The public maintenance page intentionally returns HTTP 200. Koyeb's
+        # default HTTP health check may probe `/`; returning 503 here would make
+        # the instance unhealthy and can cause Koyeb to stop/restart it before an
+        # administrator gets a chance to turn maintenance mode back off. The
+        # actual public APIs continue to return 503 while maintenance is enabled.
         return web.Response(
             text=MAINTENANCE_HTML,
             content_type="text/html",
-            status=503,
+            status=200,
             headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
         )
 
