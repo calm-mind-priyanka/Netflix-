@@ -95,3 +95,48 @@ def validate_admin_session(token):
         )
     except Exception:
         return False
+
+
+def hash_user_secret(secret, iterations=210000):
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", str(secret).encode("utf-8"), salt, iterations
+    ).hex()
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest}"
+
+
+def verify_user_secret(secret, stored):
+    try:
+        scheme, iterations, salt_hex, expected = str(stored or "").split("$", 3)
+        if scheme != "pbkdf2_sha256":
+            return False
+        actual = hashlib.pbkdf2_hmac(
+            "sha256", str(secret).encode("utf-8"), bytes.fromhex(salt_hex), int(iterations)
+        ).hex()
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+
+def make_user_session(user_id, version, ttl=2592000):
+    exp = int(time.time()) + max(300, int(ttl))
+    nonce = secrets.token_urlsafe(24)
+    payload = f"user:{user_id}:{int(version)}:{exp}:{nonce}"
+    token = f"{payload}:{_sign(payload)}"
+    return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def validate_user_session(token):
+    try:
+        raw = base64.urlsafe_b64decode(
+            str(token or "") + "=" * (-len(str(token or "")) % 4)
+        ).decode("utf-8")
+        role, user_id, version, exp, nonce, signature = raw.split(":", 5)
+        payload = f"{role}:{user_id}:{version}:{exp}:{nonce}"
+        if role != "user" or int(exp) < int(time.time()):
+            return None
+        if not hmac.compare_digest(signature, _sign(payload)):
+            return None
+        return {"user_id": user_id, "version": int(version), "expires": int(exp)}
+    except Exception:
+        return None
