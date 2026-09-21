@@ -93,7 +93,7 @@ ULTRON_SEARCH = UltronSearchEngine()
 ULTRON_SEARCH_CONCURRENCY = 3
 from .web_store import ensure_indexes as ensure_web_indexes, get_catalog_identity
 from .verification import requirement as verification_requirement, status as verification_status, complete as verification_complete
-from .users import create_account as user_create_account, login as user_login, logout as user_logout, me as user_me, update_nickname as user_update_nickname, admin_users_list, admin_user_detail, admin_payments, admin_history
+from .users import create_account as user_create_account, login as user_login, logout as user_logout, me as user_me, update_nickname as user_update_nickname, admin_users_list, admin_user_detail, admin_payments, admin_history, admin_history_delete, admin_history_clear
 
 # Keep homepage catalog work bounded. The website only needs enough recent
 # media records to build the visible homepage; it must never materialize the
@@ -968,15 +968,20 @@ async def resolve(request):
 
 async def admin_shortener_test(request):
     require_admin(request)
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        raise web.HTTPBadRequest(text="Invalid JSON body")
+    if not isinstance(data, dict):
+        raise web.HTTPBadRequest(text="Request body must be an object")
     stage = str(data.get("stage", "1"))
     if stage not in {"1", "2", "3"}:
         raise web.HTTPBadRequest(text="stage must be 1, 2, or 3")
     target = str(data.get("url") or PUBLIC_URL or "").strip()
     if not target:
         raise web.HTTPBadRequest(text="A test URL is required")
-    from .verification import _shorten
-    result = await _shorten(target, int(stage))
+    from .verification_provider import shorten
+    result = await shorten(target, int(stage))
     return web.json_response({"ok": True, "stage": int(stage), "input": target, "shortlink": result})
 
 
@@ -1104,6 +1109,7 @@ async def admin_settings_get(request):
 
 
 async def admin_settings_update(request):
+    global MAINTENANCE
     require_admin(request)
     try:
         data = await request.json()
@@ -1128,6 +1134,9 @@ async def admin_settings_update(request):
     else:
         settings_patch = {}
     settings = await update_admin_settings(settings_patch)
+    MAINTENANCE = bool(settings.get("site", {}).get("maintenance", MAINTENANCE))
+    # Never return write-only verification secrets in the admin API response.
+    settings = get_public_settings()
     # Settings are process-local controls; invalidate derived search/metadata caches
     # so the next request observes the new admin configuration.
     SEARCH_CACHE.clear()
@@ -1135,6 +1144,17 @@ async def admin_settings_update(request):
     META_CACHE.clear()
     ULTRON_SEARCH.cache.clear()
     return web.json_response({"ok": True, "settings": settings}, headers={"Cache-Control": "no-store"})
+
+
+async def admin_payment_qr_remove(request):
+    require_admin(request)
+    # QR is optional configuration. Clearing it removes the stored data URL
+    # rather than forcing the administrator to replace it with another image.
+    settings = await update_admin_settings({"payments": {"manual_qr": ""}})
+    return web.json_response(
+        {"ok": True, "settings": get_public_settings()},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def admin_settings_remove(request):
@@ -1145,6 +1165,8 @@ async def admin_settings_remove(request):
     if not path or not path.startswith(allowed_prefixes):
         raise web.HTTPBadRequest(text="Invalid settings path")
     settings = await remove_admin_setting(path)
+    if path.startswith("site.maintenance"):
+        MAINTENANCE = bool(settings.get("site", {}).get("maintenance", False))
     SEARCH_CACHE.clear()
     GROUP_CACHE.clear()
     META_CACHE.clear()
@@ -1155,7 +1177,9 @@ async def admin_settings_remove(request):
 
 async def admin_settings_reset(request):
     require_admin(request)
-    settings = await reset_admin_settings()
+    await reset_admin_settings()
+    settings = get_public_settings()
+    MAINTENANCE = bool(settings.get("site", {}).get("maintenance", False))
     SEARCH_CACHE.clear()
     GROUP_CACHE.clear()
     META_CACHE.clear()
@@ -1299,7 +1323,7 @@ async def api_error_middleware(request, handler):
     try:
         return await handler(request)
     except web.HTTPException as exc:
-        if request.path.startswith("/api/"):
+        if request.path.startswith("/api/") or request.path.startswith("/admin/api/"):
             return web.json_response(
                 {
                     "ok": False,
@@ -1310,12 +1334,11 @@ async def api_error_middleware(request, handler):
         raise
     except Exception as exc:
         LOGGER.exception("Unhandled request failure: %s", exc)
-        if request.path.startswith("/api/"):
+        if request.path.startswith("/api/") or request.path.startswith("/admin/api/"):
             return web.json_response(
                 {
                     "ok": False,
                     "error": "Backend failure",
-                    "detail": str(exc),
                 },
                 status=500,
             )
@@ -1328,7 +1351,7 @@ async def maintenance_middleware(request, handler):
         return await handler(request)
 
     if MAINTENANCE:
-        if request.path.startswith("/api/"):
+        if request.path.startswith("/api/") or request.path.startswith("/admin/api/"):
             return web.json_response(
                 {
                     "ok": False,
@@ -1349,7 +1372,9 @@ async def maintenance_middleware(request, handler):
 
 async def startup(app):
     await ensure_web_indexes()
-    await init_settings_store()
+    settings = await init_settings_store()
+    global MAINTENANCE
+    MAINTENANCE = bool(settings.get("site", {}).get("maintenance", False))
     missing = []
     if not DATABASE_URI:
         missing.append("DATABASE_URI")
@@ -1447,6 +1472,7 @@ def create_app():
     app.router.add_get("/admin/api/settings", admin_settings_get)
     app.router.add_put("/admin/api/settings", admin_settings_update)
     app.router.add_post("/admin/api/settings/reset", admin_settings_reset)
+    app.router.add_post("/admin/api/payment/qr/remove", admin_payment_qr_remove)
     app.router.add_post("/admin/api/settings/remove", admin_settings_remove)
     app.router.add_post("/admin/api/premium/grant", premium_admin_grant)
     app.router.add_post("/admin/api/premium/revoke", premium_admin_revoke)
@@ -1456,6 +1482,8 @@ def create_app():
     app.router.add_get("/admin/api/users/{user_id}", admin_user_detail)
     app.router.add_get("/admin/api/payments", admin_payments)
     app.router.add_get("/admin/api/history", admin_history)
+    app.router.add_delete("/admin/api/history/{event_id}", admin_history_delete)
+    app.router.add_post("/admin/api/history/clear", admin_history_clear)
     app.router.add_get("/admin/api/premium/manual", premium_admin_manual_list)
     app.router.add_get("/admin/api/premium/manual/{request_id}/proof", premium_admin_manual_proof)
     app.router.add_post("/admin/api/premium/manual/decide", premium_admin_manual_decide)

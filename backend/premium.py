@@ -492,10 +492,21 @@ async def admin_manual_proof(request):
 async def admin_manual_decide(request):
     if not _admin_ok(request):
         raise web.HTTPUnauthorized(text="Admin login required")
-    body = await request.json()
-    rid = str(body.get("request_id", ""))
-    action = str(body.get("action", "")).lower()
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"ok": False, "error": "Request body must be an object"}, status=400)
+    rid = str(body.get("request_id", "")).strip()
+    action = str(body.get("action", "")).strip().lower()
+    if not rid:
+        return web.json_response({"ok": False, "error": "Missing payment request ID"}, status=400)
+    if action not in {"approve", "reject"}:
+        return web.json_response({"ok": False, "error": "Invalid action"}, status=400)
     await _ready()
+    if premium_manual is None or payments is None:
+        return web.json_response({"ok": False, "error": "Payment storage is unavailable"}, status=503)
     r = await premium_manual.find_one({"request_id": rid})
     if not r:
         return web.json_response({"ok": False, "error": "Request not found"}, status=404)
@@ -503,16 +514,17 @@ async def admin_manual_decide(request):
         return web.json_response({"ok": False, "error": "Request already processed"}, status=400)
     now = int(time.time())
     if action == "approve":
-        exp = await _activate(r["user_id"], r["plan_id"], "manual", rid, actor="admin", payment_method="upi_manual")
+        try:
+            exp = await _activate(r["user_id"], r["plan_id"], "manual", rid, actor="admin", payment_method="upi_manual")
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
         await premium_manual.update_one({"request_id": rid}, {"$set": {"status": "approved", "approved_at": now, "reviewed_at": now, "expires_at": exp}})
         await payments.update_one({"payment_id": rid}, {"$set": {"status": "approved", "reviewed_at": now, "approved_at": now, "expires_at": exp}})
         await _record_history(r["user_id"], "MANUAL_PAYMENT_APPROVED", {"request_id": rid, "utr": r.get("utr", ""), "expires_at": exp}, actor="admin")
-    elif action == "reject":
+    else:
         await premium_manual.update_one({"request_id": rid}, {"$set": {"status": "rejected", "rejected_at": now, "reviewed_at": now}})
         await payments.update_one({"payment_id": rid}, {"$set": {"status": "rejected", "reviewed_at": now, "rejected_at": now}})
         await _record_history(r["user_id"], "MANUAL_PAYMENT_REJECTED", {"request_id": rid, "utr": r.get("utr", "")}, actor="admin")
-    else:
-        return web.json_response({"ok": False, "error": "Invalid action"}, status=400)
     return web.json_response({"ok": True, "status": action})
 
 

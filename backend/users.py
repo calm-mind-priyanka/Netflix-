@@ -17,7 +17,7 @@ from .auth import (
     make_user_session,
     validate_user_session,
 )
-from .web_store import users, history
+from .web_store import users, history, payments
 
 SESSION_COOKIE = "vyra_session"
 SESSION_TTL = 60 * 60 * 24 * 30
@@ -273,31 +273,100 @@ async def admin_user_detail(request):
         "history": history_rows,
     })
 
-async def admin_payments(request):
+def _admin_session_ok(request):
     from .auth import validate_admin_session
-    if not validate_admin_session(request.cookies.get("admin_session", "")):
+    return validate_admin_session(request.cookies.get("admin_session", ""))
+
+
+def _positive_int(value, default, maximum):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(maximum, n))
+
+
+async def admin_payments(request):
+    if not _admin_session_ok(request):
         raise web.HTTPUnauthorized(text="Admin login required")
     await _ready()
     status = str(request.query.get("status", "")).strip()
     uid = str(request.query.get("user_id", "")).strip()
+    page = _positive_int(request.query.get("page", "1"), 1, 1000000)
+    limit = _positive_int(request.query.get("limit", "50"), 50, 100)
     query = {}
-    if status: query["status"] = status
-    if uid: query["user_id"] = uid
+    if status:
+        query["status"] = status
+    if uid:
+        query["user_id"] = uid
+    if payments is None:
+        return web.json_response({"ok": True, "payments": [], "page": page, "limit": limit, "total": 0, "pages": 0})
+    total = await payments.count_documents(query)
+    pages = (total + limit - 1) // limit if total else 0
+    if pages and page > pages:
+        page = pages
     rows = []
-    if payments is not None:
-        async for p in payments.find(query).sort("created_at", -1).limit(500):
-            p.pop("_id", None); rows.append(p)
-    return web.json_response({"ok": True, "payments": rows})
+    cursor = payments.find(query).sort("created_at", -1).skip((page - 1) * limit).limit(limit)
+    async for p in cursor:
+        p.pop("_id", None)
+        rows.append(p)
+    return web.json_response({
+        "ok": True, "payments": rows, "page": page, "limit": limit,
+        "total": total, "pages": pages,
+    })
+
 
 async def admin_history(request):
-    from .auth import validate_admin_session
-    if not validate_admin_session(request.cookies.get("admin_session", "")):
+    if not _admin_session_ok(request):
         raise web.HTTPUnauthorized(text="Admin login required")
     await _ready()
     uid = str(request.query.get("user_id", "")).strip()
+    page = _positive_int(request.query.get("page", "1"), 1, 1000000)
+    limit = _positive_int(request.query.get("limit", "50"), 50, 100)
     query = {"user_id": uid} if uid else {}
+    if history is None:
+        return web.json_response({"ok": True, "history": [], "page": page, "limit": limit, "total": 0, "pages": 0})
+    total = await history.count_documents(query)
+    pages = (total + limit - 1) // limit if total else 0
+    if pages and page > pages:
+        page = pages
     rows = []
-    if history is not None:
-        async for h in history.find(query).sort("created_at", -1).limit(500):
-            h.pop("_id", None); rows.append(h)
-    return web.json_response({"ok": True, "history": rows})
+    cursor = history.find(query).sort("created_at", -1).skip((page - 1) * limit).limit(limit)
+    async for h in cursor:
+        h.pop("_id", None)
+        rows.append(h)
+    return web.json_response({
+        "ok": True, "history": rows, "page": page, "limit": limit,
+        "total": total, "pages": pages,
+    })
+
+
+async def admin_history_delete(request):
+    if not _admin_session_ok(request):
+        raise web.HTTPUnauthorized(text="Admin login required")
+    await _ready()
+    event_id = str(request.match_info.get("event_id", "")).strip()
+    if not event_id:
+        raise web.HTTPBadRequest(text="Missing history event ID")
+    if history is None:
+        raise web.HTTPServiceUnavailable(text="History storage is unavailable")
+    result = await history.delete_one({"event_id": event_id})
+    if not result.deleted_count:
+        return web.json_response({"ok": False, "error": "History event not found"}, status=404)
+    return web.json_response({"ok": True, "deleted": 1})
+
+
+async def admin_history_clear(request):
+    if not _admin_session_ok(request):
+        raise web.HTTPUnauthorized(text="Admin login required")
+    await _ready()
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    uid = str(data.get("user_id", "")).strip() if isinstance(data, dict) else ""
+    if history is None:
+        raise web.HTTPServiceUnavailable(text="History storage is unavailable")
+    query = {"user_id": uid} if uid else {}
+    result = await history.delete_many(query)
+    return web.json_response({"ok": True, "deleted": int(result.deleted_count), "user_id": uid})
