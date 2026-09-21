@@ -325,13 +325,14 @@ async def reset_settings():
 def get_public_settings():
     """Return settings with shortener API secrets redacted."""
     value = get_settings()
-    for path in ("verification.shorteners.1.api", "verification.shorteners.2.api", "verification.shorteners.3.api"):
-        obj = value
-        keys = path.split(".")
-        for key in keys[:-1]:
-            obj = obj[key]
-        if obj.get(keys[-1]):
-            obj[keys[-1]] = None
+    for number in ("1", "2", "3"):
+        item = value.get("verification", {}).get("shorteners", {}).get(number, {})
+        # The browser must never receive the secret itself, but it does need a
+        # safe signal so the admin UI can distinguish "not configured" from
+        # "configured but intentionally hidden".
+        item["api_configured"] = bool(item.get("api"))
+        if item.get("api"):
+            item["api"] = None
     for key in ("api", "api_two", "api_three"):
         if value["ultron"].get(key):
             value["ultron"][key] = None

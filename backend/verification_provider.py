@@ -26,12 +26,9 @@ async def shorten(url: str, stage: int) -> str:
     """
     await init_settings_store()
     settings = get_settings().get("verification", {})
-    if str(settings.get("shortlink_mode", "enabled")) != "enabled":
-        return url
-
     item = (settings.get("shorteners") or {}).get(str(stage), {})
     if not bool(item.get("enabled", False)):
-        return url
+        raise RuntimeError(f"Verification stage {stage} is enabled by the verification flow, but no shortener is configured for that stage.")
 
     site = str(item.get("name") or "").strip()
     api = str(item.get("api") or "").strip()

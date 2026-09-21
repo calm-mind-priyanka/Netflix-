@@ -1133,6 +1133,11 @@ async def admin_settings_update(request):
         settings_patch = patch
     else:
         settings_patch = {}
+    if isinstance(settings_patch, dict) and isinstance(settings_patch.get("verification"), dict):
+        # There is intentionally one public verification master switch. Keep
+        # the old shortlink_mode key synchronized for backwards compatibility
+        # with older deployments/configuration documents.
+        settings_patch["verification"]["shortlink_mode"] = "enabled" if bool(settings_patch["verification"].get("enabled", get_admin_setting("verification", "enabled", default=False))) else "disabled"
     settings = await update_admin_settings(settings_patch)
     MAINTENANCE = bool(settings.get("site", {}).get("maintenance", MAINTENANCE))
     # Never return write-only verification secrets in the admin API response.

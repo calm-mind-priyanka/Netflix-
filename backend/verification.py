@@ -1,9 +1,9 @@
 """Website verification/access gate.
 
-This is the web adaptation of the relevant Ultron verification behavior:
-1st/2nd/3rd shortener stages, configurable gaps, tutorial links and a
-Mongo-backed verification lifetime.  The website is the primary UI; Telegram
-is not required for verification.
+Verification is one master access gate.  When it is enabled, the configured
+verification shortener stages are used to issue a fresh link only when the
+current browser has not completed the required stage.  A successful stage is
+stored in MongoDB and represented by an HttpOnly browser cookie.
 """
 from __future__ import annotations
 
@@ -18,21 +18,32 @@ from .config import PUBLIC_URL
 from .verification_provider import shorten, stage_destination
 from .users import current_user
 
+COOKIE_NAME = "vyra_verify"
+
 
 def _settings():
     return get_settings().get("verification", {})
 
 
-async def state(request: web.Request):
+async def _load_cookie_row(request):
     from .web_store import ensure_indexes, verification_tokens
 
-    cookie = request.cookies.get("vyra_verify", "")
+    cookie = request.cookies.get(COOKIE_NAME, "").strip()
     if not cookie or verification_tokens is None:
-        return 0, 0.0, ""
+        return None
     await ensure_indexes()
     await init_settings_store()
     row = await verification_tokens.find_one({"code": cookie})
-    if not row or float(row.get("expires", 0) or 0) <= time.time():
+    if not row:
+        return None
+    if float(row.get("expires", 0) or 0) <= time.time():
+        return None
+    return row
+
+
+async def state(request: web.Request):
+    row = await _load_cookie_row(request)
+    if not row:
         return 0, 0.0, ""
     return (
         int(row.get("stage", 0) or 0),
@@ -42,20 +53,28 @@ async def state(request: web.Request):
 
 
 def required_stage(stage: int, verified_at: float, now: float | None = None) -> int:
-    """Match Ultron's delayed second/third verification behavior."""
+    """Return the next configured verification stage that is due."""
     settings = _settings()
     now = now or time.time()
-    required = max(1, min(3, int(stage or 0) or 1))
+    current = max(0, min(3, int(stage or 0)))
+    if current <= 0 or not verified_at:
+        return 1
+
     shorteners = settings.get("shorteners") or {}
-    stage2_enabled = bool((shorteners.get("2") or {}).get("enabled", False))
-    stage3_enabled = bool((shorteners.get("3") or {}).get("enabled", False))
-    gap2 = max(0, int(settings.get("verification_time_2", 0) or 0))
-    gap3 = max(0, int(settings.get("verification_time_3", 0) or 0))
-    if stage >= 1 and stage2_enabled and now - verified_at >= gap2:
-        required = 2
-    if stage >= 2 and stage3_enabled and now - verified_at >= gap3:
-        required = 3
-    return required
+    # A later stage is due only when that stage is enabled and its configured
+    # delay has elapsed. A zero delay means it is due immediately, matching the
+    # explicit admin configuration rather than silently skipping the stage.
+    for number, gap_key in ((2, "verification_time_2"), (3, "verification_time_3")):
+        if current >= number:
+            continue
+        enabled = bool((shorteners.get(str(number)) or {}).get("enabled", False))
+        if not enabled:
+            continue
+        gap = max(0, int(settings.get(gap_key, 0) or 0))
+        if now - verified_at >= gap:
+            return number
+        break
+    return current
 
 
 def _verification_expiry(now: float) -> float:
@@ -68,32 +87,45 @@ def _base_url(request: web.Request) -> str:
     return configured or str(request.url.origin())
 
 
+async def _premium_bypasses(request: web.Request) -> bool:
+    """Premium is a single access decision: if configured to bypass verification,
+    it bypasses the whole verification/shortlink gate."""
+    if not bool(get_value("payments", "premium_bypass_verification", default=True)):
+        return False
+    try:
+        from .premium import get_status
+        user = await current_user(request)
+        if not user:
+            return False
+        return bool((await get_status(user["user_id"])).get("premium"))
+    except Exception:
+        return False
+
+
 async def requirement(request: web.Request, file_id: str):
     settings = _settings()
     if not bool(settings.get("enabled", False)):
         return None
 
-    # Premium can independently bypass the shortener gate when the Admin
-    # setting is enabled. This is separate from the verification-bypass flag.
-    if bool(get_value("payments", "premium_bypass_shortener", default=True)):
-        try:
-            from .users import current_user
-            from .premium import get_status
-            user = await current_user(request)
-            if user and (await get_status(user["user_id"])).get("premium"):
-                return None
-        except Exception:
-            pass
+    if await _premium_bypasses(request):
+        return None
 
-    stage, verified_at, _ = await state(request)
+    row = await _load_cookie_row(request)
     now = time.time()
+    stage = int(row.get("stage", 0) or 0) if row else 0
+    verified_at = float(row.get("verified_at", 0) or 0) if row else 0.0
     required = required_stage(stage, verified_at, now) if verified_at else 1
-    if stage >= required and verified_at:
+
+    if row and bool(row.get("verified", False)) and stage >= required and verified_at:
         return None
 
     from .web_store import ensure_indexes, verification_tokens
 
     await ensure_indexes()
+    await init_settings_store()
+
+    # A new attempt always receives a new opaque token and a new shortlink.
+    # This prevents an old URL from being reused for another Watch attempt.
     code = secrets.token_urlsafe(32)
     destination = stage_destination(_base_url(request), code, required)
     try:
@@ -107,28 +139,27 @@ async def requirement(request: web.Request, file_id: str):
             "validity_hours": max(1, int(settings.get("validity_hours", 24) or 24)),
             "verification_error": str(exc),
         }
-    tutorial = str(
-        settings.get(f"tutorial_{required}")
-        or settings.get("tutorial_1")
-        or ""
-    ).strip()
 
-    now = time.time()
+    tutorial = str(settings.get(f"tutorial_{required}") or settings.get("tutorial_1") or "").strip()
     user = await current_user(request)
     user_id = user["user_id"] if user else ""
-    await verification_tokens.insert_one(
-        {
-            "code": code,
-            "user_id": user_id,
-            "file_id": str(file_id),
-            "stage": required,
-            "verified_at": 0,
-            "issued_at": now,
-            "expires": _verification_expiry(now),
-            "used": False,
-            "short_url": short_url,
-        }
-    )
+    issued = time.time()
+    expires = _verification_expiry(issued)
+
+    await verification_tokens.insert_one({
+        "code": code,
+        "user_id": user_id,
+        # Verification is account/browser scoped, not movie scoped.  The
+        # selected file is retained for audit/debugging only.
+        "file_id": str(file_id),
+        "stage": required,
+        "verified_at": 0,
+        "verified": False,
+        "issued_at": issued,
+        "expires": expires,
+        "used": False,
+        "short_url": short_url,
+    })
 
     return {
         "verification_required": True,
@@ -142,8 +173,10 @@ async def requirement(request: web.Request, file_id: str):
 
 async def status(request: web.Request):
     settings = _settings()
-    stage, verified_at, _ = await state(request)
-    valid = bool(stage and verified_at)
+    row = await _load_cookie_row(request)
+    stage = int(row.get("stage", 0) or 0) if row else 0
+    verified_at = float(row.get("verified_at", 0) or 0) if row else 0.0
+    valid = bool(row and row.get("verified", False) and verified_at)
     if valid:
         valid = stage >= required_stage(stage, verified_at)
     return {
@@ -156,7 +189,7 @@ async def status(request: web.Request):
 
 
 async def complete(request: web.Request):
-    """Consume a verification destination and establish the browser state."""
+    """Consume a generated verification destination and establish browser state."""
     from .web_store import ensure_indexes, verification_tokens
 
     code = request.query.get("code", "").strip()
@@ -167,27 +200,22 @@ async def complete(request: web.Request):
     current_user_id = user["user_id"] if user else ""
     now = time.time()
 
-    if (
-        not row
-        or float(row.get("expires", 0) or 0) <= now
-        or bool(row.get("used", False))
-        or requested_stage not in {0, int(row.get("stage", 0) or 0)}
-        or (row.get("user_id") and current_user_id and row.get("user_id") != current_user_id)
-    ):
-        raise web.HTTPBadRequest(
-            text="Verification link expired or invalid. Please request a new verification link."
-        )
-
-    await verification_tokens.update_one(
-        {"code": code, "used": {"$ne": True}},
-        {
-            "$set": {
-                "verified_at": now,
-                "verified": True,
-                "used": True,
-            }
-        },
+    valid = (
+        bool(row)
+        and float(row.get("expires", 0) or 0) > now
+        and not bool(row.get("used", False))
+        and requested_stage in {0, int(row.get("stage", 0) or 0)}
+        and (not row.get("user_id") or row.get("user_id") == current_user_id)
     )
+    if not valid:
+        raise web.HTTPBadRequest(text="Verification link expired or invalid. Please request a new verification link.")
+
+    result = await verification_tokens.update_one(
+        {"code": code, "used": {"$ne": True}},
+        {"$set": {"verified_at": now, "verified": True, "used": True}},
+    )
+    if result.modified_count != 1:
+        raise web.HTTPBadRequest(text="Verification link has already been used. Please request a new verification link.")
 
     base = _base_url(request)
     validity = max(1, int(_settings().get("validity_hours", 24) or 24))
@@ -195,10 +223,10 @@ async def complete(request: web.Request):
 <html lang=\"en\"><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
 <title>Verification complete</title>
 <style>body{{font-family:system-ui;background:#07111f;color:#fff;display:grid;place-items:center;min-height:100vh;margin:0}}main{{max-width:520px;text-align:center;padding:28px}}a{{display:inline-block;margin-top:18px;padding:12px 18px;border-radius:10px;background:#fff;color:#07111f;text-decoration:none;font-weight:800}}</style>
-</head><body><main><h1>✓ Verification complete</h1><p>Your verification is active for up to {validity} hours.</p><p>Return to VYRA and press Watch or Download again.</p><a href=\"{base}/\">Return to VYRA</a></main></body></html>"""
+</head><body><main><h1>✓ Verification complete</h1><p>Your verification is active for up to {validity} hours.</p><p>Return to VYRA and press Watch again.</p><a href=\"{base}/\">Return to VYRA</a></main></body></html>"""
     response = web.Response(text=html, content_type="text/html")
     response.set_cookie(
-        "vyra_verify",
+        COOKIE_NAME,
         code,
         httponly=True,
         secure=True,
