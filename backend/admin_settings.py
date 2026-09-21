@@ -13,6 +13,8 @@ import os
 from copy import deepcopy
 from urllib.parse import urlparse
 
+from .config import MANUAL_PAYMENT_INSTRUCTIONS, MANUAL_PAYMENT_QR, PAYMENT_PROVIDER
+
 DEFAULT_SETTINGS = {
     # Names intentionally follow the website UI, while ``ultron`` below keeps
     # the exact AutoFilter setting names available for compatibility/auditing.
@@ -63,6 +65,10 @@ DEFAULT_SETTINGS = {
         "activation_mode": "environment",
         "premium_bypass_verification": True,
         "premium_bypass_shortener": True,
+        "manual_enabled": PAYMENT_PROVIDER in {"manual", "both"},
+        "upi_id": "",
+        "manual_instructions": MANUAL_PAYMENT_INSTRUCTIONS,
+        "manual_qr": MANUAL_PAYMENT_QR,
     },
     "site": {
         "maintenance": False,
