@@ -24,6 +24,7 @@ function renderPlans(plans=[]){
 }
 
 async function loadSettings(){
+  paymentUserFilter='';
   try{
     const s=await api('/admin/api/settings');
     const v=s.settings?.verification||{}, sh=v.shorteners||{}, se=s.settings?.search||{}, f=s.settings?.files||{}, m=s.settings?.metadata||{}, pay=s.settings?.payments||{};
@@ -34,11 +35,11 @@ async function loadSettings(){
     $('maxResults').value=se.max_results||20;$('resultsPerPage').value=se.results_per_page||20;$('candidateLimit').value=se.candidate_limit||120;$('spellCheck').checked=se.spell_check!==false;$('fuzzy').checked=se.fuzzy_fallback!==false;$('imdb').checked=!!se.imdb_poster;
     $('fileSecure').checked=!!f.file_secure;$('autoDelete').checked=!!f.auto_delete;$('autoDeleteSeconds').value=f.auto_delete_seconds||60;$('tmdbEnabled').checked=!!m.tmdb_enabled;$('posterFallback').checked=m.poster_fallback!==false;
     $('activationMode').value=pay.activation_mode||'environment';$('premiumBypass').checked=pay.premium_bypass_verification!==false;$('premiumShortenerBypass').checked=pay.premium_bypass_shortener!==false;$('manualEnabled').checked=pay.manual_enabled!==false;$('upiId').value=pay.upi_id||'';$('paymentInstructions').value=pay.manual_instructions||'';
-    if(pay.manual_qr){$('qrPreview').src=pay.manual_qr;$('qrPreview').classList.remove('hidden');}else{$('qrPreview').classList.add('hidden');}
+    if(pay.manual_qr){$('qrPreview').src=pay.manual_qr;$('qrPreview').classList.remove('hidden');$('removeQr').classList.remove('hidden');}else{$('qrPreview').removeAttribute('src');$('qrPreview').classList.add('hidden');$('removeQr').classList.add('hidden');}
     renderPlans(s.plans||[]);
     $('state').textContent=JSON.stringify(s.settings,null,2);
     $('panel').classList.remove('hidden');
-    await Promise.all([loadUsers(),loadPremiumUsers(),loadRequests(),loadPayments(),loadHistory()]);
+    await Promise.all([loadUsers(),loadPremiumUsers(),loadRequests(),loadPayments()]); setHistoryVisible(false); $('historySummary').textContent='History is hidden until requested.';
   }catch(e){if(e.status===401){location.replace('/admin');return;}notice(`Could not load settings: ${e.message}`,'error');}
 }
 
@@ -66,6 +67,18 @@ $('savePayments').onclick=async()=>{
   }catch(e){notice(`Payment save failed: ${e.message}`,'error');}finally{setBusy('savePayments',false);}
 };
 
+$('removeQr').onclick=async()=>{
+  if(!confirm('Remove the configured payment QR?')) return;
+  setBusy('removeQr',true,'Removing…');
+  try{
+    await api('/admin/api/payment/qr/remove',{method:'POST'});
+    $('qrUpload').value='';
+    notice('Payment QR removed.','success');
+    await loadSettings();
+  }catch(e){notice(`QR removal failed: ${e.message}`,'error');}
+  finally{setBusy('removeQr',false);}
+};
+
 async function loadUsers(){
   try{
     const q=encodeURIComponent(val('userSearch').trim());
@@ -80,9 +93,9 @@ async function viewUser(uid){
   try{
     const d=await api(`/admin/api/users/${encodeURIComponent(uid)}`);
     const p=d.premium||{};
-    $('premiumUserId').value=uid;
-    $('selectedUser').innerHTML=`<div class="request"><b>${esc(d.user.nickname)}</b> — <code>${esc(uid)}</code><br>Premium: <b>${p.premium?'ACTIVE':'INACTIVE'}</b>${p.expires_at?` • Expires ${new Date(p.expires_at*1000).toLocaleString()}`:''}<br>Payments: ${d.payments?.length||0} • Manual requests: ${d.manual_requests?.length||0} • History events: ${d.history?.length||0}<br><button data-load-pay="${esc(uid)}">Load payments</button> <button data-load-hist="${esc(uid)}">Load history</button></div>`;
-    await loadPayments(uid); await loadHistory(uid);
+    $('premiumUserId').value=uid; paymentUserFilter=uid;
+    $('selectedUser').innerHTML=`<div class="request"><b>${esc(d.user.nickname)}</b> — <code>${esc(uid)}</code><br>Premium: <b>${p.premium?'ACTIVE':'INACTIVE'}</b>${p.expires_at?` • Expires ${new Date(p.expires_at*1000).toLocaleString()}`:''}<br>Payments: ${d.payments?.length||0} • Manual requests: ${d.manual_requests?.length||0} • History events: ${d.history?.length||0}</div>`;
+    await loadPayments(uid);
   }catch(e){notice(e.message,'error');}
 }
 
@@ -110,24 +123,72 @@ async function loadRequests(){
     const d=await api('/admin/api/premium/manual'); const box=$('manualRequests'); box.innerHTML='';
     if(!d.requests?.length){box.innerHTML='<p class="muted">No manual payment requests.</p>';return;}
     d.requests.forEach(r=>{const el=document.createElement('div');el.className='request';el.innerHTML=`<b>${esc(r.nickname||'Unknown')}</b> — <code>${esc(r.user_id)}</code><br>${esc(r.plan_name)} — ₹${esc(r.amount)} • ${esc(String(r.status||'pending').toUpperCase())}<br>UTR: <code>${esc(r.utr||'—')}</code><br><small>${new Date((r.created_at||0)*1000).toLocaleString()}</small><br><a href="/admin/api/premium/manual/${encodeURIComponent(r.id)}/proof" target="_blank" rel="noopener">View screenshot</a> ${r.status==='pending'?'<button data-rid="'+esc(r.id)+'" data-act="approve">Approve</button><button data-rid="'+esc(r.id)+'" data-act="reject" class="danger">Reject</button>':''}`;box.appendChild(el);});
-    box.querySelectorAll('[data-act]').forEach(b=>b.onclick=async()=>{try{await api('/admin/api/premium/manual/decide',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:b.dataset.rid,action:b.dataset.act})});notice(`Request ${b.dataset.act}d.`,'success');await loadRequests();await loadPayments();}catch(e){notice(e.message,'error');}});
+    box.querySelectorAll('[data-act]').forEach(b=>b.onclick=async()=>{try{await api('/admin/api/premium/manual/decide',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:b.dataset.rid,action:b.dataset.act})});notice(`Request ${b.dataset.act}d.`,'success');await loadRequests();paymentUserFilter='';await loadPayments('',1);}catch(e){notice(e.message,'error');}});
   }catch(e){notice(`Requests: ${e.message}`,'error');}
 }
 
-async function loadPayments(uidOverride=null){
+let paymentPage=1, historyPage=1, paymentUserFilter='';
+const pageSize=50;
+
+async function loadPayments(uidOverride=null, page=1){
   try{
-    const uid=uidOverride!==null?uidOverride:val('paymentUserId').trim(); const status=val('paymentStatus'); const qs=new URLSearchParams();if(uid)qs.set('user_id',uid);if(status)qs.set('status',status);const d=await api('/admin/api/payments'+(qs.toString()?`?${qs}`:''));
-    $('paymentsList').innerHTML=d.payments?.length?d.payments.map(p=>`<div class="request"><b>${esc(p.nickname||'Unknown')}</b> — <code>${esc(p.user_id)}</code><br>${esc(p.plan_name||p.plan_id)} — ₹${esc(p.amount)} • ${esc(p.method||'')} • <b>${esc(p.status||'')}</b><br>${p.utr?`UTR: <code>${esc(p.utr)}</code><br>`:''}<small>${new Date((p.created_at||0)*1000).toLocaleString()}</small></div>`).join(''):'<p class="muted">No payments found.</p>';
+    const uid=uidOverride!==null?uidOverride:(paymentUserFilter||val('paymentUserId').trim());
+    paymentUserFilter=uid;
+    const status=val('paymentStatus');
+    const qs=new URLSearchParams({page:String(page),limit:String(pageSize)});
+    if(uid)qs.set('user_id',uid);
+    if(status)qs.set('status',status);
+    const d=await api('/admin/api/payments?'+qs.toString());
+    paymentPage=d.page||1;
+    $('paymentsList').innerHTML=d.payments?.length?d.payments.map(p=>`<div class="request"><b>${esc(p.nickname||'Unknown')}</b> — <code>${esc(p.user_id||'')}</code><br>${esc(p.plan_name||p.plan_id||'')} — ₹${esc(p.amount??'')} • ${esc(p.method||'')} • <b>${esc(p.status||'')}</b><br>${p.utr?`UTR: <code>${esc(p.utr)}</code><br>`:''}<small>${new Date((p.created_at||0)*1000).toLocaleString()}</small></div>`).join(''):'<p class="muted">No payments found.</p>';
+    const pager=$('paymentPager');
+    pager.innerHTML=d.pages>1?`<button id="paymentPrev" ${paymentPage<=1?'disabled':''}>Previous</button><span>Page ${paymentPage} / ${d.pages} • ${d.total} total</span><button id="paymentNext" ${paymentPage>=d.pages?'disabled':''}>Next</button>`:(d.total?`<span class="muted">${d.total} payment${d.total===1?'':'s'}</span>`:'');
+    $('paymentPrev')?.addEventListener('click',()=>loadPayments(paymentUserFilter,paymentPage-1));
+    $('paymentNext')?.addEventListener('click',()=>loadPayments(paymentUserFilter,paymentPage+1));
   }catch(e){notice(`Payments: ${e.message}`,'error');}
 }
-$('loadPayments').onclick=()=>loadPayments();
+$('loadPayments').onclick=()=>{paymentUserFilter=val('paymentUserId').trim();loadPayments(paymentUserFilter,1);};
+$('paymentStatus').onchange=()=>loadPayments(paymentUserFilter,1);
 
-async function loadHistory(uidOverride=null){
+function setHistoryVisible(show){
+  $('historyList').classList.toggle('hidden',!show);
+  $('historyPager').classList.toggle('hidden',!show);
+  $('hideHistory').classList.toggle('hidden',!show);
+  $('clearHistory').classList.toggle('hidden',!show);
+  $('viewHistory').classList.toggle('hidden',show);
+}
+
+async function loadHistory(uidOverride=null, page=1){
   try{
-    const uid=uidOverride!==null?uidOverride:val('historyUserId').trim();const qs=uid?`?user_id=${encodeURIComponent(uid)}`:'';const d=await api('/admin/api/history'+qs);
-    $('historyList').innerHTML=d.history?.length?d.history.map(h=>`<div class="request"><b>${esc(h.event_type)}</b> — <code>${esc(h.user_id)}</code><br><small>${new Date((h.created_at||0)*1000).toLocaleString()} • actor: ${esc(h.actor||'system')}</small><pre>${esc(JSON.stringify(h.metadata||{},null,2))}</pre></div>`).join(''):'<p class="muted">No history events.</p>';
+    const uid=uidOverride!==null?uidOverride:val('historyUserId').trim();
+    const qs=new URLSearchParams({page:String(page),limit:String(pageSize)});
+    if(uid)qs.set('user_id',uid);
+    const d=await api('/admin/api/history?'+qs.toString());
+    historyPage=d.page||1;
+    setHistoryVisible(true);
+    $('historySummary').textContent=d.total?`${d.total} history event${d.total===1?'':'s'}`:'No history available.';
+    $('historyList').innerHTML=d.history?.length?d.history.map(h=>`<div class="request"><b>${esc(h.event_type||'Event')}</b> — <code>${esc(h.user_id||'')}</code><br><small>${new Date((h.created_at||0)*1000).toLocaleString()} • actor: ${esc(h.actor||'system')}</small><pre>${esc(JSON.stringify(h.metadata||{},null,2))}</pre><button class="danger" data-history-id="${esc(h.event_id||'')}">Delete</button></div>`).join(''):'<p class="muted">No history available.</p>';
+    $('historyList').querySelectorAll('[data-history-id]').forEach(b=>b.onclick=async()=>{
+      if(!b.dataset.historyId || !confirm('Delete this history event?'))return;
+      try{await api('/admin/api/history/'+encodeURIComponent(b.dataset.historyId),{method:'DELETE'});notice('History event deleted.','success');await loadHistory(uid,historyPage);}
+      catch(e){notice(`Delete failed: ${e.message}`,'error');}
+    });
+    const pager=$('historyPager');
+    $('historyPage').textContent=d.pages>1?`Page ${historyPage} / ${d.pages} • ${d.total} total`:`${d.total||0} total`;
+    $('historyPrev').disabled=historyPage<=1;$('historyNext').disabled=!d.pages||historyPage>=d.pages;
   }catch(e){notice(`History: ${e.message}`,'error');}
 }
-$('loadHistory').onclick=()=>loadHistory();
+$('viewHistory').onclick=()=>loadHistory(null,1);
+$('hideHistory').onclick=()=>setHistoryVisible(false);
+$('historyPrev').onclick=()=>loadHistory(null,historyPage-1);
+$('historyNext').onclick=()=>loadHistory(null,historyPage+1);
+$('clearHistory').onclick=async()=>{
+  const uid=val('historyUserId').trim();
+  if(!confirm(uid?`Clear all history for User ${uid}?`:'Clear ALL user history?'))return;
+  try{
+    const d=await api('/admin/api/history/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid})});
+    notice(`Cleared ${d.deleted||0} history event(s).`,'success');await loadHistory(uid,1);
+  }catch(e){notice(`Clear history failed: ${e.message}`,'error');}
+};
 
 (async()=>{try{await loadSettings();}catch(e){notice(e.message,'error');}})();
