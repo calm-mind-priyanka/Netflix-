@@ -36,7 +36,7 @@ from .config import (
     telegram_ready,
 )
 from .admin_settings import get_settings as get_admin_settings, get_public_settings, get_value as get_admin_setting, update_settings as update_admin_settings, reset_settings as reset_admin_settings, remove_setting as remove_admin_setting, init_settings_store
-from .premium import status as premium_status, create_order as premium_create_order, verify_payment as premium_verify_payment, webhook as premium_webhook, admin_grant as premium_admin_grant, get_status as get_premium_status, manual_submit as premium_manual_submit, my_manual as premium_my_manual, admin_manual_list as premium_admin_manual_list, admin_manual_proof as premium_admin_manual_proof, admin_manual_decide as premium_admin_manual_decide
+from .premium import status as premium_status, create_order as premium_create_order, verify_payment as premium_verify_payment, webhook as premium_webhook, admin_grant as premium_admin_grant, admin_revoke as premium_admin_revoke, admin_extend as premium_admin_extend, admin_premium_users as premium_admin_users, get_status as get_premium_status, manual_submit as premium_manual_submit, my_manual as premium_my_manual, admin_manual_list as premium_admin_manual_list, admin_manual_proof as premium_admin_manual_proof, admin_manual_decide as premium_admin_manual_decide
 from .database import (
     collection_counts,
     find_media,
@@ -93,6 +93,7 @@ ULTRON_SEARCH = UltronSearchEngine()
 ULTRON_SEARCH_CONCURRENCY = 3
 from .web_store import ensure_indexes as ensure_web_indexes, get_catalog_identity
 from .verification import requirement as verification_requirement, status as verification_status, complete as verification_complete
+from .users import create_account as user_create_account, login as user_login, logout as user_logout, me as user_me, update_nickname as user_update_nickname, admin_users_list, admin_user_detail, admin_payments, admin_history
 
 # Keep homepage catalog work bounded. The website only needs enough recent
 # media records to build the visible homepage; it must never materialize the
@@ -265,19 +266,18 @@ async def home(request):
 
 
 async def access_status(request):
+    from .users import current_user
     state = await verification_status(request)
-    uid = request.cookies.get("vyra_user", "")
-    premium = await get_premium_status(uid)
-    response = web.json_response({
+    user = await current_user(request)
+    premium = await get_premium_status(user["user_id"]) if user else {"premium": False, "expires_at": 0}
+    return web.json_response({
         "ok": True,
         **state,
+        "authenticated": bool(user),
+        "user_id": user.get("user_id", "") if user else "",
         "premium": bool(premium.get("premium")),
         "expires_at": int(premium.get("expires_at", 0) or 0),
     })
-    if not uid:
-        from .premium import ensure_user
-        ensure_user(response)
-    return response
 
 
 def _norm_setting(value):
@@ -1044,8 +1044,11 @@ async def _premium_active(request):
     try:
         if not bool(get_admin_setting('payments','premium_bypass_verification',default=True)):
             return False
-        uid=request.cookies.get("vyra_user","")
-        return bool((await get_premium_status(uid)).get("premium"))
+        from .users import current_user
+        user = await current_user(request)
+        if not user:
+            return False
+        return bool((await get_premium_status(user["user_id"])).get("premium"))
     except Exception:
         return False
 
@@ -1096,7 +1099,8 @@ def _set_status(request, name, configured):
 
 async def admin_settings_get(request):
     require_admin(request)
-    return web.json_response({"ok": True, "settings": get_public_settings()}, headers={"Cache-Control": "no-store"})
+    from .config import PREMIUM_PLANS
+    return web.json_response({"ok": True, "settings": get_public_settings(), "plans": [{"id": k, "name": v["name"], "days": v["days"], "price_inr": v["price_inr"]} for k, v in PREMIUM_PLANS.items()]}, headers={"Cache-Control": "no-store"})
 
 
 async def admin_settings_update(request):
@@ -1145,7 +1149,8 @@ async def admin_settings_remove(request):
     GROUP_CACHE.clear()
     META_CACHE.clear()
     ULTRON_SEARCH.cache.clear()
-    return web.json_response({"ok": True, "settings": get_public_settings()}, headers={"Cache-Control": "no-store"})
+    from .config import PREMIUM_PLANS
+    return web.json_response({"ok": True, "settings": get_public_settings(), "plans": [{"id": k, "name": v["name"], "days": v["days"], "price_inr": v["price_inr"]} for k, v in PREMIUM_PLANS.items()]}, headers={"Cache-Control": "no-store"})
 
 
 async def admin_settings_reset(request):
@@ -1399,7 +1404,7 @@ async def cleanup(app):
 
 def create_app():
     app = web.Application(
-        client_max_size=1024 * 1024,
+        client_max_size=8 * 1024 * 1024,
         middlewares=[api_error_middleware, maintenance_middleware],
     )
 
@@ -1413,6 +1418,11 @@ def create_app():
     app.router.add_get("/api/resolve", resolve)
     app.router.add_get("/api/stream-token/{file_id}", token)
     app.router.add_get("/api/download-policy", download_policy)
+    app.router.add_post("/api/account/create", user_create_account)
+    app.router.add_post("/api/account/login", user_login)
+    app.router.add_post("/api/account/logout", user_logout)
+    app.router.add_get("/api/account/me", user_me)
+    app.router.add_put("/api/account/nickname", user_update_nickname)
     app.router.add_get("/api/premium", premium_status)
     app.router.add_get("/api/access-status", access_status)
     app.router.add_post("/api/premium/order", premium_create_order)
@@ -1439,6 +1449,13 @@ def create_app():
     app.router.add_post("/admin/api/settings/reset", admin_settings_reset)
     app.router.add_post("/admin/api/settings/remove", admin_settings_remove)
     app.router.add_post("/admin/api/premium/grant", premium_admin_grant)
+    app.router.add_post("/admin/api/premium/revoke", premium_admin_revoke)
+    app.router.add_post("/admin/api/premium/extend", premium_admin_extend)
+    app.router.add_get("/admin/api/premium/users", premium_admin_users)
+    app.router.add_get("/admin/api/users", admin_users_list)
+    app.router.add_get("/admin/api/users/{user_id}", admin_user_detail)
+    app.router.add_get("/admin/api/payments", admin_payments)
+    app.router.add_get("/admin/api/history", admin_history)
     app.router.add_get("/admin/api/premium/manual", premium_admin_manual_list)
     app.router.add_get("/admin/api/premium/manual/{request_id}/proof", premium_admin_manual_proof)
     app.router.add_post("/admin/api/premium/manual/decide", premium_admin_manual_decide)
