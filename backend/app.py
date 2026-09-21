@@ -484,12 +484,18 @@ async def _search_uncached(query):
 async def search(request):
     query = request.query.get("q", "").strip()
     if not query:
-        return web.json_response({"ok": True, "items": [], "count": 0})
+        return web.json_response({"ok": True, "items": [], "count": 0, "total": 0, "page": 0, "page_size": 20})
 
-    # Apply the live Admin settings on every request.  This means changing
-    # fuzzy/correction/cache/concurrency/max-results in the panel immediately
-    # changes the real search engine instead of merely changing a UI field.
-    max_results = max(1, int(get_admin_setting("search", "max_results", default=10)))
+    # ``max_results`` is the total retained search set; ``results_per_page``
+    # controls only what the browser displays. This is the important
+    # AutoFilter behavior: pagination must not throw away the remaining
+    # matches, because the user may still filter/open any of them.
+    max_results = max(1, int(get_admin_setting("search", "max_results", default=200)))
+    page_size = max(10, min(50, int(get_admin_setting("search", "results_per_page", default=20))))
+    try:
+        page = max(0, int(request.query.get("page", "0")))
+    except ValueError:
+        page = 0
     candidate_limit = max(20, min(500, int(get_admin_setting("search", "candidate_limit", default=120))))
     fuzzy = bool(get_admin_setting("search", "fuzzy_fallback", default=True)) and bool(get_admin_setting("search", "spell_check", default=True))
     external = bool(get_admin_setting("search", "external_correction", default=True))
@@ -500,13 +506,28 @@ async def search(request):
         ULTRON_SEARCH_CONCURRENCY = desired_concurrency
         ULTRON_SEARCH.semaphore = asyncio.Semaphore(desired_concurrency)
 
-    # Keep the engine cache policy aligned with the Admin panel.
     key = ULTRON_SEARCH._key(query)
     cached = ULTRON_SEARCH.cache.get(key)
     if cached and time.time() - cached[0] < ttl:
         ULTRON_SEARCH.cache.move_to_end(key)
-        return web.json_response({"ok": True, "items": cached[1][:max_results], "count": min(len(cached[1]), max_results), "cached": True})
+        selected = cached[1][:max_results]
+        total = len(selected)
+        start = page * page_size
+        return web.json_response({
+            "ok": True,
+            "items": selected[start:start + page_size],
+            "count": len(selected[start:start + page_size]),
+            "total": total,
+            "files": sum(int(i.get("count") or 0) for i in selected),
+            "page": page,
+            "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+            "cached": True,
+        })
 
+    # Fetch the complete configured search set once, then paginate it in the
+    # HTTP response. UltronSearchEngine still uses bounded Mongo queries and
+    # single-flight concurrency, so this does not create one DB query per page.
     selected, cached_flag = await ULTRON_SEARCH.search(
         query,
         candidate_limit=candidate_limit,
@@ -515,8 +536,6 @@ async def search(request):
         external_correction=external,
     )
 
-    # Search is catalog-first, so external metadata is never on the critical
-    # path.  Enrich at most the first two visible results and fail soft.
     if selected and bool(get_admin_setting("metadata", "tmdb_enabled", default=True)) and TMDB_API_KEY:
         targets = [i for i, item in enumerate(selected) if not item.get("poster")][:2]
         if targets and bool(get_admin_setting("metadata", "poster_fallback", default=True)):
@@ -525,14 +544,27 @@ async def search(request):
                 if not isinstance(value, Exception):
                     selected[i] = value
 
-    # Never cache a no-result caused by a transient DB/network failure.
     if selected:
         ULTRON_SEARCH.cache[key] = (time.time(), selected)
         ULTRON_SEARCH.cache.move_to_end(key)
         cache_max = max(16, int(get_admin_setting("search", "search_cache_max", default=256)))
         while len(ULTRON_SEARCH.cache) > cache_max:
             ULTRON_SEARCH.cache.popitem(last=False)
-    return web.json_response({"ok": True, "items": selected[:max_results], "count": min(len(selected), max_results), "cached": cached_flag})
+
+    total = len(selected)
+    start = page * page_size
+    visible = selected[start:start + page_size]
+    return web.json_response({
+        "ok": True,
+        "items": visible,
+        "count": len(visible),
+        "total": total,
+        "files": sum(int(i.get("count") or 0) for i in selected),
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, (total + page_size - 1) // page_size),
+        "cached": cached_flag,
+    })
 
 
 async def _cached_or_search_items(query):
@@ -873,7 +905,7 @@ async def filter_media(request):
         "ok": bool(matches),
         "count": len(matches),
         "file": matches[0] if matches else None,
-        "matches": matches[:100],
+        "matches": matches[:1000],
         "query": target.get("title") or query,
         "title_id": target.get("id"),
         "exact": len(matches)==1,
@@ -1010,6 +1042,8 @@ async def stream_compatible(request):
 
 async def _premium_active(request):
     try:
+        if not bool(get_admin_setting('payments','premium_bypass_verification',default=True)):
+            return False
         uid=request.cookies.get("vyra_user","")
         return bool((await get_premium_status(uid)).get("premium"))
     except Exception:
@@ -1174,6 +1208,8 @@ def require_admin(request):
 
 async def admin_login(request):
     if request.method == "GET":
+        if is_admin(request):
+            raise web.HTTPFound("/admin/")
         return web.Response(text=ADMIN_HTML, content_type="text/html")
 
     data = await request.post()
