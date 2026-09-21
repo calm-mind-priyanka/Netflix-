@@ -28,13 +28,13 @@ async function loadSettings(){
   try{
     const s=await api('/admin/api/settings');
     const v=s.settings?.verification||{}, sh=v.shorteners||{}, se=s.settings?.search||{}, f=s.settings?.files||{}, m=s.settings?.metadata||{}, pay=s.settings?.payments||{};
-    $('verifyEnabled').checked=!!v.enabled; $('shortlinkEnabled').checked=v.shortlink_mode!=='disabled';
-    ['1','2','3'].forEach(n=>{$(`s${n}on`).checked=!!sh[n]?.enabled;$(`s${n}name`).value=sh[n]?.name||'';$(`s${n}api`).value='';});
+    $('verifyEnabled').checked=!!v.enabled;
+    ['1','2','3'].forEach(n=>{$(`s${n}on`).checked=!!sh[n]?.enabled;$(`s${n}name`).value=sh[n]?.name||'';const api=$(`s${n}api`);api.value='';api.placeholder=sh[n]?.api_configured?'API configured — leave blank to keep':'Enter API key';});
     $('t1').value=v.tutorial_1||'';$('t2').value=v.tutorial_2||'';$('t3').value=v.tutorial_3||'';$('v2').value=v.verification_time_2||0;$('v3').value=v.verification_time_3||0;$('validity').value=v.validity_hours||24;
     $('maintenance').checked=!!s.settings?.site?.maintenance;
     $('maxResults').value=se.max_results||20;$('resultsPerPage').value=se.results_per_page||20;$('candidateLimit').value=se.candidate_limit||120;$('spellCheck').checked=se.spell_check!==false;$('fuzzy').checked=se.fuzzy_fallback!==false;$('imdb').checked=!!se.imdb_poster;
     $('fileSecure').checked=!!f.file_secure;$('autoDelete').checked=!!f.auto_delete;$('autoDeleteSeconds').value=f.auto_delete_seconds||60;$('tmdbEnabled').checked=!!m.tmdb_enabled;$('posterFallback').checked=m.poster_fallback!==false;
-    $('activationMode').value=pay.activation_mode||'environment';$('premiumBypass').checked=pay.premium_bypass_verification!==false;$('premiumShortenerBypass').checked=pay.premium_bypass_shortener!==false;$('manualEnabled').checked=pay.manual_enabled!==false;$('upiId').value=pay.upi_id||'';$('paymentInstructions').value=pay.manual_instructions||'';
+    $('activationMode').value=pay.activation_mode||'environment';$('premiumBypass').checked=pay.premium_bypass_verification!==false;$('manualEnabled').checked=pay.manual_enabled!==false;$('upiId').value=pay.upi_id||'';$('paymentInstructions').value=pay.manual_instructions||'';
     if(pay.manual_qr){$('qrPreview').src=pay.manual_qr;$('qrPreview').classList.remove('hidden');$('removeQr').classList.remove('hidden');}else{$('qrPreview').removeAttribute('src');$('qrPreview').classList.add('hidden');$('removeQr').classList.add('hidden');}
     renderPlans(s.plans||[]);
     $('state').textContent=JSON.stringify(s.settings,null,2);
@@ -48,7 +48,7 @@ $('refresh').onclick=()=>loadSettings();
 $('saveMaintenance').onclick=()=>saveSettings('saveMaintenance',{site:{maintenance:$('maintenance').checked}},'Website settings saved.');
 $('saveSearch').onclick=()=>saveSettings('saveSearch',{search:{max_results:Number(val('maxResults')||20),results_per_page:Number(val('resultsPerPage')||20),candidate_limit:Number(val('candidateLimit')||120),spell_check:$('spellCheck').checked,fuzzy_fallback:$('fuzzy').checked,imdb_poster:$('imdb').checked}},'Search settings saved.');
 $('saveFiles').onclick=()=>saveSettings('saveFiles',{files:{file_secure:$('fileSecure').checked,auto_delete:$('autoDelete').checked,auto_delete_seconds:Number(val('autoDeleteSeconds')||60)},metadata:{tmdb_enabled:$('tmdbEnabled').checked,poster_fallback:$('posterFallback').checked}},'File and metadata settings saved.');
-$('saveVerify').onclick=()=>saveSettings('saveVerify',{verification:{enabled:$('verifyEnabled').checked,shortlink_mode:$('shortlinkEnabled').checked?'enabled':'disabled',shorteners:{'1':{enabled:$('s1on').checked,name:val('s1name')},'2':{enabled:$('s2on').checked,name:val('s2name')},'3':{enabled:$('s3on').checked,name:val('s3name')}},tutorial_1:val('t1'),tutorial_2:val('t2'),tutorial_3:val('t3'),verification_time_2:Number(val('v2')||0),verification_time_3:Number(val('v3')||0),validity_hours:Number(val('validity')||24)}},'Verification settings saved.');
+$('saveVerify').onclick=()=>saveSettings('saveVerify',{verification:{enabled:$('verifyEnabled').checked,shorteners:{'1':{enabled:$('s1on').checked,name:val('s1name'),api:val('s1api')},'2':{enabled:$('s2on').checked,name:val('s2name'),api:val('s2api')},'3':{enabled:$('s3on').checked,name:val('s3name'),api:val('s3api')}},tutorial_1:val('t1'),tutorial_2:val('t2'),tutorial_3:val('t3'),verification_time_2:Number(val('v2')||0),verification_time_3:Number(val('v3')||0),validity_hours:Number(val('validity')||24)}},'Verification settings saved.');
 
 async function qrDataUrl(){
   const f=$('qrUpload').files?.[0];
@@ -60,7 +60,7 @@ $('savePayments').onclick=async()=>{
   setBusy('savePayments',true);
   try{
     const qr=await qrDataUrl();
-    const payments={activation_mode:val('activationMode'),premium_bypass_verification:$('premiumBypass').checked,premium_bypass_shortener:$('premiumShortenerBypass').checked,manual_enabled:$('manualEnabled').checked,upi_id:val('upiId'),manual_instructions:val('paymentInstructions')};
+    const payments={activation_mode:val('activationMode'),premium_bypass_verification:$('premiumBypass').checked,manual_enabled:$('manualEnabled').checked,upi_id:val('upiId'),manual_instructions:val('paymentInstructions')};
     if(qr) payments.manual_qr=qr;
     await api('/admin/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({payments})});
     $('qrUpload').value=''; notice('Payment settings saved to MongoDB.','success'); await loadSettings();
