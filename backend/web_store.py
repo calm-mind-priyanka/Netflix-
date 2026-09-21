@@ -15,6 +15,9 @@ _db = None
 premium_users = None
 premium_orders = None
 premium_manual = None
+payments = None
+users = None
+history = None
 verification_tokens = None
 settings = None
 catalog_index = None
@@ -29,6 +32,9 @@ if DATABASE_URI:
     premium_users = _db[os.getenv("WEBSITE_PREMIUM_USERS_COLLECTION", "vyra_premium_users")]
     premium_orders = _db[os.getenv("WEBSITE_PREMIUM_ORDERS_COLLECTION", "vyra_premium_orders")]
     premium_manual = _db[os.getenv("WEBSITE_PREMIUM_MANUAL_COLLECTION", "vyra_premium_manual")]
+    payments = _db[os.getenv("WEBSITE_PAYMENTS_COLLECTION", "vyra_payments")]
+    users = _db[os.getenv("WEBSITE_USERS_COLLECTION", "vyra_users")]
+    history = _db[os.getenv("WEBSITE_HISTORY_COLLECTION", "vyra_user_history")]
     verification_tokens = _db[os.getenv("WEBSITE_VERIFY_COLLECTION", "vyra_verification_tokens")]
     settings = _db[WEBSITE_SETTINGS_COLLECTION]
     catalog_index = _db[WEBSITE_CATALOG_COLLECTION]
@@ -42,7 +48,17 @@ async def ensure_indexes():
     try:
         await premium_orders.create_index("order_id", unique=True)
         await premium_users.create_index("user_id", unique=True)
+        await users.create_index("user_id", unique=True)
+        await users.create_index([("nickname", 1), ("created_at", -1)])
+        await payments.create_index("payment_id", unique=True)
+        await payments.create_index([("user_id", 1), ("created_at", -1)])
+        await payments.create_index([("status", 1), ("created_at", -1)])
+        await payments.create_index("provider_order_id")
+        await payments.create_index("utr")
+        await history.create_index([("user_id", 1), ("created_at", -1)])
+        await history.create_index([("event_type", 1), ("created_at", -1)])
         await premium_manual.create_index([("status", 1), ("created_at", 1)])
+        await premium_manual.create_index("utr", unique=True, sparse=True)
         await verification_tokens.create_index("code", unique=True)
         await verification_tokens.create_index("expires", expireAfterSeconds=0)
         await verification_tokens.create_index([("user_id", 1), ("stage", 1), ("expires", -1)])

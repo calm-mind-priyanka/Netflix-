@@ -13,9 +13,10 @@ from urllib.parse import quote
 
 from aiohttp import web
 
-from .admin_settings import get_settings, init_settings_store
+from .admin_settings import get_settings, get_value, init_settings_store
 from .config import PUBLIC_URL
 from .verification_provider import shorten, stage_destination
+from .users import current_user
 
 
 def _settings():
@@ -72,6 +73,18 @@ async def requirement(request: web.Request, file_id: str):
     if not bool(settings.get("enabled", False)):
         return None
 
+    # Premium can independently bypass the shortener gate when the Admin
+    # setting is enabled. This is separate from the verification-bypass flag.
+    if bool(get_value("payments", "premium_bypass_shortener", default=True)):
+        try:
+            from .users import current_user
+            from .premium import get_status
+            user = await current_user(request)
+            if user and (await get_status(user["user_id"])).get("premium"):
+                return None
+        except Exception:
+            pass
+
     stage, verified_at, _ = await state(request)
     now = time.time()
     required = required_stage(stage, verified_at, now) if verified_at else 1
@@ -101,7 +114,8 @@ async def requirement(request: web.Request, file_id: str):
     ).strip()
 
     now = time.time()
-    user_id = request.cookies.get("vyra_user", "").strip()
+    user = await current_user(request)
+    user_id = user["user_id"] if user else ""
     await verification_tokens.insert_one(
         {
             "code": code,
@@ -149,7 +163,8 @@ async def complete(request: web.Request):
     requested_stage = int(request.query.get("stage", "0") or 0)
     await ensure_indexes()
     row = await verification_tokens.find_one({"code": code}) if code else None
-    current_user = request.cookies.get("vyra_user", "").strip()
+    user = await current_user(request)
+    current_user_id = user["user_id"] if user else ""
     now = time.time()
 
     if (
@@ -157,7 +172,7 @@ async def complete(request: web.Request):
         or float(row.get("expires", 0) or 0) <= now
         or bool(row.get("used", False))
         or requested_stage not in {0, int(row.get("stage", 0) or 0)}
-        or (row.get("user_id") and current_user and row.get("user_id") != current_user)
+        or (row.get("user_id") and current_user_id and row.get("user_id") != current_user_id)
     ):
         raise web.HTTPBadRequest(
             text="Verification link expired or invalid. Please request a new verification link."
