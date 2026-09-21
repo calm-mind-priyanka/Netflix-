@@ -3,6 +3,7 @@ from pathlib import Path
 from aiohttp import web
 from .config import PREMIUM_PLANS, PAYMENT_PROVIDER, RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET, MANUAL_PAYMENT_INSTRUCTIONS, MANUAL_PAYMENT_QR
 from .web_store import premium_users, premium_orders, premium_manual
+from .admin_settings import get_value
 
 async def _ready():
     from .web_store import ensure_indexes
@@ -30,11 +31,15 @@ async def get_status(uid):
 
 async def status(request):
     uid=user_id(request)
-    resp=web.json_response({'ok':True,'user_id':uid,'provider':PAYMENT_PROVIDER,'plans':plan_list(),'manual_instructions':MANUAL_PAYMENT_INSTRUCTIONS,'manual_qr':MANUAL_PAYMENT_QR,**await get_status(uid)})
+    activation_mode=str(get_value('payments','activation_mode',default='environment')).lower()
+    resp=web.json_response({'ok':True,'user_id':uid,'provider':PAYMENT_PROVIDER,'activation_mode':activation_mode,'plans':plan_list(),'manual_instructions':MANUAL_PAYMENT_INSTRUCTIONS,'manual_qr':MANUAL_PAYMENT_QR,**await get_status(uid)})
     if not uid: ensure_user(resp)
     return resp
 
 async def create_order(request):
+    activation_mode=str(get_value('payments','activation_mode',default='environment')).lower()
+    if activation_mode=='manual':
+        return web.json_response({'ok':False,'error':'Automatic payment is disabled by the admin. Please use manual payment proof.'},status=403)
     body=await request.json(); plan_id=str(body.get('plan_id','30day')); plan=PREMIUM_PLANS.get(plan_id)
     if not plan: return web.json_response({'ok':False,'error':'Invalid premium plan'},status=400)
     if PAYMENT_PROVIDER not in ('razorpay','both') or not (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET):
@@ -86,6 +91,9 @@ async def webhook(request):
     return web.Response(status=200)
 
 async def manual_submit(request):
+    activation_mode=str(get_value('payments','activation_mode',default='environment')).lower()
+    if activation_mode=='auto':
+        return web.json_response({'ok':False,'error':'Manual payment is disabled by the admin.'},status=403)
     if PAYMENT_PROVIDER not in ('manual','both'): return web.json_response({'ok':False,'error':'Manual payment is disabled.'},status=403)
     uid=user_id(request)
     if not uid: return web.json_response({'ok':False,'error':'User cookie missing; reload and try again.'},status=400)
