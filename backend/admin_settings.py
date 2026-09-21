@@ -34,13 +34,14 @@ DEFAULT_SETTINGS = {
         "shortlink_mode": "enabled",
     },
     "search": {
-        "max_results": 10,
+        "max_results": 200,
+        "results_per_page": 20,
         "result_mode": "buttons",
         "imdb_poster": False,
         "fuzzy_fallback": True,
         "external_correction": False,
         "spell_check": True,
-        "candidate_limit": 60,
+        "candidate_limit": 120,
         "search_cache_ttl": 30,
         "search_cache_max": 256,
         "search_concurrency": 3,
@@ -57,6 +58,11 @@ DEFAULT_SETTINGS = {
     "metadata": {
         "tmdb_enabled": False,
         "poster_fallback": True,
+    },
+    "payments": {
+        "activation_mode": "environment",
+        "premium_bypass_verification": True,
+        "premium_bypass_shortener": True,
     },
     "site": {
         "maintenance": False,
@@ -203,12 +209,16 @@ def _validate(state):
         raise ValueError("verification.file_mode_type must be single, group, or both")
     if v["shortlink_mode"] not in {"enabled", "disabled"}:
         raise ValueError("verification.shortlink_mode must be enabled or disabled")
+    payments = state.get("payments", {})
+    if payments.get("activation_mode", "environment") not in {"environment", "auto", "manual"}:
+        raise ValueError("payments.activation_mode must be environment, auto, or manual")
     # Website verification is browser-based. Telegram is not a required
     # verification dependency; each enabled stage must have a provider name
     # and API key before it is allowed to generate a short link.
     if s["result_mode"] not in {"buttons", "links"}:
         raise ValueError("search.result_mode must be buttons or links")
-    s["max_results"] = max(1, min(50, int(s["max_results"])))
+    s["max_results"] = max(1, min(200, int(s["max_results"])))
+    s["results_per_page"] = max(10, min(50, int(s.get("results_per_page", 20))))
     s["candidate_limit"] = max(20, min(500, int(s["candidate_limit"])))
     s["search_cache_ttl"] = max(1, min(600, int(s["search_cache_ttl"])))
     s["search_cache_max"] = max(16, min(2048, int(s["search_cache_max"])))
