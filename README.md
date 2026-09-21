@@ -47,3 +47,14 @@ The app listens on `0.0.0.0` and `$PORT`. `/health` is lightweight. Search uses 
 ## Environment
 
 Copy `.env.example` to `.env` or configure the same variables in Koyeb. Keep the existing AutoFilter Mongo URI/database/collection variables. Set a long random `SITE_SECRET`. Configure Telegram credentials only when playback/download is required; website verification itself does not require Telegram.
+
+
+## AutoFilter-style website flow
+- Search returns logical movie/series matches with file counts.
+- Each result can expose cumulative Language → Quality → Season → Episode filters.
+- Filters apply to the full real title group, not only the visible page.
+- File results are paginated at 20 per page in the browser.
+- Each real file exposes Watch and Download actions.
+- Watch/download use protected stream tokens and the same verification/premium gate.
+- Premium bypasses verification while active.
+- Admin controls for result count, spelling/fuzzy search, verification stages and manual premium approvals are live.
