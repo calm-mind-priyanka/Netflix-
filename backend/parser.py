@@ -10,7 +10,7 @@ QUALITY_RE = re.compile(
     re.I,
 )
 RELEASE_QUALITY_FALLBACK_RE = re.compile(
-    r"(?<!\w)(?:\d{3,4})p(?!\w)",
+    r"(?<!\w)(\d{3,4})p(?!\w)",
     re.I,
 )
 SE_RE = re.compile(
