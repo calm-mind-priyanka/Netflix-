@@ -686,14 +686,7 @@ async def _load_grouped_title(title_name, title_id=None, year_hint=None):
             GROUP_INFLIGHT.pop(cache_key, None)
 
     if title_id and value and value.get("id") != title_id:
-        # A catalog ID is derived from the parsed title/year. If parsing is
-        # cleaned up (for example removing @Channel or # markers), an older
-        # cached ID may differ even though the resolved MongoDB title is the
-        # same. Do not report a false not-found in that case.
-        requested_norm = normalize_for_search(name)
-        resolved_norm = normalize_for_search(value.get("title") or "")
-        if not requested_norm or requested_norm != resolved_norm:
-            return None
+        return None
     return value
 
 

@@ -59,7 +59,7 @@ AUDIO_RE = re.compile(
     r"AC3|EAC3|DDP?(?:\s*[0-9]+(?:(?:\s*[.]\s*|\s+)[0-9]+)?)?|DD\+|DTS(?:[- .]?HD)?|Atmos)(?!\w)",
     re.I,
 )
-BRACKET_RE = re.compile(r"\[[^\]]*\]|\([^)]*\)|\{[^}]*\}")
+BRACKET_RE = re.compile(r"\[[^\]]*\]|\([^)]*\)")
 SEPARATORS_RE = re.compile(r"[._]+")
 
 
@@ -290,22 +290,8 @@ def _remove_release_brackets(text):
 
 
 def clean_title(value):
-    """Normalize Telegram/AutoFilter filenames into a logical title.
-
-    This keeps the existing Netflix metadata extraction but also removes
-    Telegram channel/mention noise and normalizes the punctuation used by
-    Devil AutoFilter filenames.
-    """
+    """Normalize a filename to a display/search title without destroying title numbers."""
     s = str(value or "").strip()
-    if not s:
-        return "Untitled"
-
-    s = re.sub(r"https?://\S+", " ", s, flags=re.I)
-    # @Channel/@username is release metadata. A leading # is a tag marker,
-    # so remove the marker but preserve the title text after it.
-    s = re.sub(r"(?<!\w)@[A-Za-z0-9_]+", " ", s)
-    s = re.sub(r"(?<!\w)#(?=\w)", " ", s)
-
     s = EXT_RE.sub("", s)
     original = s
     s = _remove_release_brackets(s)
@@ -316,10 +302,15 @@ def clean_title(value):
     s = QUALITY_RE.sub(" ", s)
     s = TECH_RE.sub(" ", s)
     s = AUDIO_RE.sub(" ", s)
+    # Common packed/release labels seen in AutoFilter filenames. They are asset
+    # metadata, never part of the logical title. Keep this intentionally narrow
+    # so meaningful numeric movie titles are not damaged.
     s = re.sub(r"(?<!\w)\d+(?:[.]\d+)?\s*(?:ch|channels?)(?!\w)", " ", s, flags=re.I)
     s = re.sub(r"(?<!\w)(?:5[.]1|7[.]1)(?!\w)", " ", s, flags=re.I)
     s = re.sub(r"(?<!\w)[a-z0-9]{2,16}(?:mkv)(?!\w)", " ", s, flags=re.I)
 
+    # Year is release metadata when it is at the end or follows another title token.
+    # Keep a numeric-only title such as "1917" intact.
     year_matches = list(YEAR_RE.finditer(s))
     for match in reversed(year_matches):
         if match.end() == len(s.strip()) or match.start() > 0:
@@ -330,12 +321,9 @@ def clean_title(value):
         s = re.sub(rf"(?<!\w){re.escape(lang)}(?!\w)", " ", s, flags=re.I)
 
     s = re.sub(r"(?<!\w)(?:dubbed|subbed|subs|full\s*movie)(?!\w)", " ", s, flags=re.I)
-    # Devil stores _, -, ., + as spaces. Treat the same separators uniformly
-    # and discard remaining punctuation/emoji as title separators.
-    s = re.sub(r"[._+]+", " ", s)
+    s = SEPARATORS_RE.sub(" ", s)
     s = re.sub(r"[-]+", " ", s)
-    s = re.sub(r"[^\w\s]", " ", s, flags=re.UNICODE)
-    s = re.sub(r"\s+", " ", s).strip(" -_.+#@")
+    s = re.sub(r"\s+", " ", s).strip(" -_.")
     if not s:
         s = original
     return s or "Untitled"
