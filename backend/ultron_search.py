@@ -63,9 +63,24 @@ class UltronSearchEngine:
         year = parsed.get("year")
         base = title + (f" {year}" if year else "")
         async with self.semaphore:
+            # First search exactly like the requested logical title. This is the
+            # normal Devil AutoFilter path and keeps the result set tied to real
+            # stored filenames/captions.
             docs = await search_media(base, limit=limit)
+            # If a year was stripped from the logical title, retry without it.
             if not docs and base.casefold() != title.casefold():
                 docs = await search_media(title, limit=limit)
+            # Devil also searches the user's raw query. This matters for release
+            # records whose stored separators/tags differ from the cleaned title.
+            if not docs and str(query or '').strip().casefold() != prepared.casefold():
+                docs = await search_media(str(query or '').strip(), limit=limit)
+            # Final local fallback: search the logical title again with only its
+            # meaningful words. Never fabricate a result; all rows still come
+            # directly from the AutoFilter Mongo collection.
+            if not docs:
+                title_words = [w for w in title.split() if len(w) >= 2]
+                if len(title_words) > 1:
+                    docs = await search_media(" ".join(title_words), limit=limit)
         return docs
 
     async def _local_correction(self, query, limit):
