@@ -140,18 +140,23 @@ from functools import lru_cache
 
 @lru_cache(maxsize=512)
 def _autofilter_regex(query):
-    """Build the same kind of Mongo regex used by Auto Filter.
+    """Build a punctuation-tolerant regex for the Devil AutoFilter records.
 
-    Auto Filter does one bounded Mongo query using a release-name-aware regex,
-    rather than downloading a large candidate set and then searching it in
-    Python.  Keep this function intentionally small and deterministic.
+    Devil normalizes _, -, ., + when saving/searching filenames. Telegram
+    records can additionally contain #, @, brackets, punctuation and emoji.
+    Logical title tokens therefore need to match across any non-word
+    separator rather than only a small hard-coded separator set.
     """
     value = re.sub(r"\s+", " ", str(query or "").strip())
     if not value:
         return None
-    parts = value.split(" ")
-    escaped = [r"(\b|[\.\+\-_])" + re.escape(part) + r"(\b|[\.\+\-_])" for part in parts]
-    return r".*[\s\.\+\-_()\[\]]".join(escaped) if len(escaped) > 1 else escaped[0]
+    value = re.sub(r"https?://\S+", " ", value, flags=re.I)
+    value = re.sub(r"[^\w]+", " ", value, flags=re.UNICODE)
+    parts = [part for part in re.split(r"\s+", value.strip()) if part]
+    if not parts:
+        return None
+    escaped = [r"(?<!\w)" + re.escape(part) + r"(?!\w)" for part in parts]
+    return r"[^\w]+".join(escaped)
 
 
 def build_search_filter(query):
@@ -290,13 +295,13 @@ def _raw_field_constraint(pattern):
 
 def _season_constraint(season):
     n=int(season)
-    return _raw_field_constraint(rf"(?:\b|[\.\+\-_])(?:s0*{n}|season\s*0*{n})(?:e(?:p(?:isode)?)?\s*0*\d+)?(?:\b|[\.\+\-_])")
+    return _raw_field_constraint(rf"(?:\b|[^\w])(?:s0*{n}|season\s*0*{n})(?:e(?:p(?:isode)?)?\s*0*\d+)?(?:\b|[^\w])")
 
 def _episode_constraint(episode):
     n=int(episode)
     return _raw_field_constraint(
-        rf"(?:\b|[\.\+\-_])(?:(?:s0*\d+|season\s*0*\d+)\s*e(?:p(?:isode)?)?\s*0*{n}|"
-        rf"e(?:p(?:isode)?)?\s*0*{n}|episode\s*0*{n}|\d+\s*x\s*0*{n})(?:\b|[\.\+\-_])"
+        rf"(?:\b|[^\w])(?:(?:s0*\d+|season\s*0*\d+)\s*e(?:p(?:isode)?)?\s*0*{n}|"
+        rf"e(?:p(?:isode)?)?\s*0*{n}|episode\s*0*{n}|\d+\s*x\s*0*{n})(?:\b|[^\w])"
     )
 
 async def search_media_with_filters(query, *, season=None, episode=None,
@@ -311,12 +316,12 @@ async def search_media_with_filters(query, *, season=None, episode=None,
     if episode is not None:
         constraints.append(_episode_constraint(episode))
     if language:
-        token = r"(?:\b|[\.\+\-_])" + re.escape(str(language).strip()) + r"(?:\b|[\.\+\-_])"
+        token = r"(?:\b|[^\w])" + re.escape(str(language).strip()) + r"(?:\b|[^\w])"
         constraints.append(_raw_field_constraint(token))
     if quality:
         q = str(quality).strip()
         q_token = q[:-1] if q.lower().endswith("p") else q
-        token = r"(?:\b|[\.\+\-_])" + re.escape(q_token) + r"p?(?:\b|[\.\+\-_])"
+        token = r"(?:\b|[^\w])" + re.escape(q_token) + r"p?(?:\b|[^\w])"
         constraints.append(_raw_field_constraint(token))
     if subtitle:
         token = r"(?<!\w)" + re.escape(str(subtitle).strip()) + r"(?!\w)"
