@@ -155,12 +155,8 @@ def _autofilter_regex(query):
     parts = [part for part in re.split(r"\s+", value.strip()) if part]
     if not parts:
         return None
-    # Devil AutoFilter treats underscore as a separator because it converts
-    # _, -, ., + to spaces when saving filenames. Use the same semantic
-    # separator here, while also accepting brackets/emoji/punctuation from
-    # older records that may still contain the original filename.
-    escaped = [r"(?<![A-Za-z0-9])" + re.escape(part) + r"(?![A-Za-z0-9])" for part in parts]
-    return r"[^A-Za-z0-9]+".join(escaped)
+    escaped = [r"(?<!\w)" + re.escape(part) + r"(?!\w)" for part in parts]
+    return r"[^\w]+".join(escaped)
 
 
 def build_search_filter(query):

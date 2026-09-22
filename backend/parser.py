@@ -9,10 +9,6 @@ QUALITY_RE = re.compile(
     r"(?<!\w)(2160p?|1440p?|1080p?|720p?|576p?|480p?|360p?|4320p?|8k|4k|2k)(?!\w)",
     re.I,
 )
-RELEASE_QUALITY_FALLBACK_RE = re.compile(
-    r"(?<!\w)(\d{3,4})p(?!\w)",
-    re.I,
-)
 SE_RE = re.compile(
     r"(?<!\w)s(?:eason)?\s*0*(\d{1,3})\s*[-_. ]?e(?:p(?:isode)?)?\s*0*(\d{1,4})(?!\w)",
     re.I,
@@ -50,7 +46,7 @@ TECH_RE = re.compile(
     r"(?<!\w)(?:WEB[- .]?(?:DL|Rip)|BluRay|BRRip|BDRip|HDRip|HDTV|DVDRip|CAMRip|HDCAM|"
     r"HEVC|AVC|x264|x265|H[ .-]?264|H[ .-]?265|10\s*bit|8\s*bit|"
     r"AAC(?:\s*[0-9]+(?:(?:\s*[.]\s*|\s+)[0-9]+)?)?|AC3|EAC3|DDP?(?:\s*[0-9]+(?:(?:\s*[.]\s*|\s+)[0-9]+)?)?|DD\+|DTS(?:[- .]?HD)?|"
-    r"Atmos|HDR10Plus|ESubS?|NF|AMZN|DSNP|MAX|iTunes|PROPER|REPACK|UNCUT|REMUX|WEB|HQ|FHD|UHD|FULLHD|"
+    r"Atmos|ESubS?|NF|AMZN|DSNP|MAX|iTunes|PROPER|REPACK|UNCUT|REMUX|WEB|HQ|FHD|UHD|FULLHD|"
     r"AV1|DS4K|HDCMKV|SAONMKV|MKV|MP4|AVI|MOV|TS|10bit|HDR10(?:\+)?|DV|DOLBY(?:\s+VISION)?)(?!\w)",
     re.I,
 )
@@ -192,7 +188,7 @@ def parse_doc(doc):
             em = EP_RE.search(source)
             episode = int(em.group(1)) if em else None
 
-        qm = QUALITY_RE.search(source) or RELEASE_QUALITY_FALLBACK_RE.search(source)
+        qm = QUALITY_RE.search(source)
         year_matches = list(YEAR_RE.finditer(source))
         ym = year_matches[-1] if year_matches else None
         languages = _extract_languages(source)
@@ -366,7 +362,7 @@ def normalize_query(query):
 
     year_match = YEAR_RE.search(value)
     year = int(year_match.group(1)) if year_match else None
-    quality_match = QUALITY_RE.search(value) or RELEASE_QUALITY_FALLBACK_RE.search(value)
+    quality_match = QUALITY_RE.search(value)
     quality = quality_match.group(1) if quality_match else None
     source_match = SOURCE_RE.search(value)
     source = source_match.group(1) if source_match else None
@@ -456,10 +452,8 @@ class _CatalogBuilder:
         self.order = []
         self.seen_files = set()
 
-    def add(self, doc, forced_title=None):
+    def add(self, doc):
         parsed = parse_doc(doc)
-        if forced_title:
-            parsed["title"] = str(forced_title).strip() or parsed.get("title")
         if parsed.get("_parse_error"):
             # Keep the bad record from taking down the request, but loggable data
             # is retained by the caller if desired. It has no playable file ID.

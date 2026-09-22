@@ -63,24 +63,9 @@ class UltronSearchEngine:
         year = parsed.get("year")
         base = title + (f" {year}" if year else "")
         async with self.semaphore:
-            # First search exactly like the requested logical title. This is the
-            # normal Devil AutoFilter path and keeps the result set tied to real
-            # stored filenames/captions.
             docs = await search_media(base, limit=limit)
-            # If a year was stripped from the logical title, retry without it.
             if not docs and base.casefold() != title.casefold():
                 docs = await search_media(title, limit=limit)
-            # Devil also searches the user's raw query. This matters for release
-            # records whose stored separators/tags differ from the cleaned title.
-            if not docs and str(query or '').strip().casefold() != prepared.casefold():
-                docs = await search_media(str(query or '').strip(), limit=limit)
-            # Final local fallback: search the logical title again with only its
-            # meaningful words. Never fabricate a result; all rows still come
-            # directly from the AutoFilter Mongo collection.
-            if not docs:
-                title_words = [w for w in title.split() if len(w) >= 2]
-                if len(title_words) > 1:
-                    docs = await search_media(" ".join(title_words), limit=limit)
         return docs
 
     async def _local_correction(self, query, limit):
@@ -147,36 +132,7 @@ class UltronSearchEngine:
         return [], None
 
     @staticmethod
-    def _query_is_explicit_in_record(doc, title):
-        """Check whether the requested logical title occurs in the raw record."""
-        import html
-        raw = " ".join([
-            str(doc.get("file_name") or ""),
-            html.unescape(str(doc.get("caption") or "")),
-        ])
-        raw_norm = normalize_for_search(raw)
-        wanted = normalize_for_search(title)
-        if not raw_norm or not wanted:
-            return False
-        wanted_tokens = wanted.split()
-        raw_tokens = raw_norm.split()
-        return any(
-            raw_tokens[i:i + len(wanted_tokens)] == wanted_tokens
-            for i in range(0, len(raw_tokens) - len(wanted_tokens) + 1)
-        )
-
-    @classmethod
-    def _build_groups(cls, docs, canonical_title=None):
-        builder = _CatalogBuilder()
-        for doc in docs:
-            try:
-                forced = (canonical_title
-                          if canonical_title and cls._query_is_explicit_in_record(doc, canonical_title)
-                          else None)
-                builder.add(doc, forced_title=forced)
-            except Exception:
-                LOGGER.exception("Catalog parse failure")
-        return builder.finish()
+    def _build_groups(docs):
         builder = _CatalogBuilder()
         for doc in docs:
             try:
@@ -208,11 +164,11 @@ class UltronSearchEngine:
             if not docs:
                 return []
 
+            groups = self._build_groups(docs)
             prepared = self.prepare_query(query)
             parsed = normalize_query(prepared)
             search_title = parsed.get("title") or correction or prepared
             wanted_year = parsed.get("year")
-            groups = self._build_groups(docs, canonical_title=search_title)
             ranked = []
             for item in groups:
                 score = search_title_score(item.get("title", ""), search_title)
