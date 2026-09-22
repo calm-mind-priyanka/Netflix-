@@ -1,8 +1,8 @@
 """Persistent website-side MongoDB storage.
 
-Media collections remain read-only. These collections are separate website
-collections in the same configured MongoDB database and store only website
-state (premium orders/users, manual proofs and verification tokens).
+Media collections remain read-only. Website collections use DATABASE_URI
+and are separate from the Devil AutoFilter media database configured through
+DATABASE_URI2. They store only website state (premium orders/users, manual proofs and verification tokens).
 """
 from __future__ import annotations
 
