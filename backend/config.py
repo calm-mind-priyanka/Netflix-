@@ -62,7 +62,7 @@ def missing_core_settings():
     missing = []
     if not DATABASE_URI:
         missing.append("DATABASE_URI")
-    if not DATABASE_URI2:
+    if MULTIPLE_DB and not DATABASE_URI2:
         missing.append("DATABASE_URI2")
     if not SITE_SECRET:
         missing.append("SITE_SECRET")
@@ -100,8 +100,7 @@ PREMIUM_PRICE_INR = min(v["price_inr"] for v in PREMIUM_PLANS.values())
 PREMIUM_DAYS = min(v["days"] for v in PREMIUM_PLANS.values())
 MANUAL_PAYMENT_INSTRUCTIONS = _env("MANUAL_PAYMENT_INSTRUCTIONS", "Pay using the configured UPI/bank method, then upload the payment screenshot for admin approval.")
 MANUAL_PAYMENT_QR = _env("MANUAL_PAYMENT_QR", "")
-# DATABASE_URI is reserved for persistent website state (users, payments,
-# premium, settings, history, etc.). DATABASE_URI2 is the read-only Devil
-# AutoFilter media source used by backend/database.py.
+# Website state uses the same configured DATABASE_URI / DATABASE_NAME as the
+# media source, but only writes to dedicated website collections.
 WEBSITE_SETTINGS_COLLECTION = _env("WEBSITE_SETTINGS_COLLECTION", "vyra_settings").strip()
 WEBSITE_CATALOG_COLLECTION = _env("WEBSITE_CATALOG_COLLECTION", "vyra_catalog_index").strip()

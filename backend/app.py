@@ -115,8 +115,8 @@ MAINTENANCE = bool(get_admin_setting("site", "maintenance", default=False))
 async def all_titles(limit=None):
     """Build the bounded homepage catalog, cached briefly in this process."""
     global HOME_CACHE, HOME_CACHE_TIME
-    if not DATABASE_URI2:
-        raise RuntimeError("DATABASE_URI2 media database is not configured")
+    if not DATABASE_URI:
+        raise RuntimeError("DATABASE_URI is not configured")
 
     requested = HOME_DOC_LIMIT if limit is None else int(limit)
     bounded = max(1, min(requested, CATALOG_MAX_DOCS, HOME_DOC_LIMIT))
@@ -631,7 +631,7 @@ async def _load_grouped_title(title_name, title_id=None, year_hint=None):
             # MongoDB documents for the entire title in memory.
             builder = _CatalogBuilder()
             seen = set()
-            configured = [("secondary", media2)] if media2 is not None else []
+            configured = [(n, c) for n, c in (("primary", media), ("secondary", media2)) if c is not None]
             succeeded = 0
             errors = []
             for db_name, collection in configured:
@@ -1210,9 +1210,7 @@ async def diagnostics(request):
             "collection": COLLECTION_NAME,
             "multiple_db": MULTIPLE_DB,
             "database_uri": "SET" if DATABASE_URI else "NOT SET",
-            "database_uri_role": "website/user data",
             "database_uri2": "SET" if DATABASE_URI2 else "NOT SET",
-            "database_uri2_role": "read-only Devil AutoFilter media",
             "telegram": {
                 "bot_token": "SET" if os.getenv("BOT_TOKEN") else "NOT SET",
                 "api_id": "SET" if os.getenv("API_ID") else "NOT SET",
@@ -1390,7 +1388,7 @@ async def startup(app):
     missing = []
     if not DATABASE_URI:
         missing.append("DATABASE_URI")
-    if not DATABASE_URI2:
+    if MULTIPLE_DB and not DATABASE_URI2:
         missing.append("DATABASE_URI2")
     if not SITE_SECRET:
         missing.append("SITE_SECRET")

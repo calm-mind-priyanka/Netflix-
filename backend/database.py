@@ -19,9 +19,16 @@ client2 = None
 db2 = None
 media2 = None
 
-# DATABASE_URI is reserved for persistent website/user data (see web_store.py).
-# DATABASE_URI2 is the single read-only AutoFilter media source.
-if DATABASE_URI2:
+if DATABASE_URI:
+    client = AsyncIOMotorClient(
+        DATABASE_URI,
+        serverSelectionTimeoutMS=8000,
+        connectTimeoutMS=8000,
+    )
+    db = client[DATABASE_NAME]
+    media = db[COLLECTION_NAME]
+
+if MULTIPLE_DB and DATABASE_URI2:
     client2 = AsyncIOMotorClient(
         DATABASE_URI2,
         serverSelectionTimeoutMS=8000,
@@ -31,24 +38,28 @@ if DATABASE_URI2:
     media2 = db2[COLLECTION_NAME]
 
 def _collections():
-    return (media2,) if media2 is not None else ()
+    return tuple(c for c in (media, media2) if c is not None)
 
 def _normalize_id(value):
     return str(value) if value is not None else ""
 
 async def ping():
-    if media2 is None:
-        raise RuntimeError("DATABASE_URI2 is not configured")
-    await client2.admin.command("ping")
+    if media is None:
+        raise RuntimeError("DATABASE_URI is not configured")
+    await client.admin.command("ping")
+    if media2 is not None:
+        await client2.admin.command("ping")
 
 async def collection_counts():
     counts = {"primary": 0, "secondary": 0}
+    if media is not None:
+        counts["primary"] = await media.count_documents({})
     if media2 is not None:
         counts["secondary"] = await media2.count_documents({})
     return counts
 
 async def iter_media(query=None, projection=None, limit=None):
-    """Read the existing Devil AutoFilter collection, read-only.
+    """Read the existing Auto Filter Bot collection(s), read-only.
 
     A database that is unreachable is skipped only when another configured
     database successfully answers. If every configured database fails, raise a
@@ -61,7 +72,7 @@ async def iter_media(query=None, projection=None, limit=None):
     succeeded = 0
     errors = []
 
-    for name, collection in (("secondary", media2),):
+    for name, collection in (("primary", media), ("secondary", media2)):
         if collection is None or remaining == 0:
             continue
         configured += 1
@@ -89,7 +100,7 @@ async def iter_media(query=None, projection=None, limit=None):
             continue
 
     if configured == 0:
-        raise RuntimeError("DATABASE_URI2 media database is not configured")
+        raise RuntimeError("No MongoDB database is configured")
     if succeeded == 0:
         raise RuntimeError(
             "All configured MongoDB databases are unreachable or the collection "
@@ -102,15 +113,15 @@ async def find_media(file_id, projection=None):
 
     The bot stores the Telegram file ID as MongoDB ``_id``. For compatibility
     with older records, ``file_id`` is also checked. Reads are attempted against
-    the configured media database without modifying either collection.
+    both configured databases without modifying either collection.
     """
     if not _collections():
-        raise RuntimeError("DATABASE_URI2 media database is not configured")
+        raise RuntimeError("No MongoDB database is configured")
 
     value = str(file_id)
     errors = []
 
-    for name, collection in (("secondary", media2),):
+    for name, collection in (("primary", media), ("secondary", media2)):
         if collection is None:
             continue
         try:
@@ -183,7 +194,7 @@ _SEARCH_PROJECTION = {
 
 
 async def search_media(query, limit=None):
-    """Fast, read-only Auto Filter style search against the configured Devil AutoFilter DB."""
+    """Fast, read-only Auto Filter style search across every configured DB."""
     search_filter = build_search_filter(query)
     if not search_filter:
         return []
@@ -201,9 +212,9 @@ async def search_media(query, limit=None):
         except Exception as exc:
             return name, [], exc
 
-    configured = [("secondary", media2)] if media2 is not None else []
+    configured = [(n, c) for n, c in (("primary", media), ("secondary", media2)) if c is not None]
     if not configured:
-        raise RuntimeError("DATABASE_URI2 media database is not configured")
+        raise RuntimeError("No MongoDB database is configured")
     results = await asyncio.gather(*(fetch(n, c) for n, c in configured))
     docs, succeeded, errors, seen = [], 0, [], set()
     for name, rows, error in results:
@@ -254,7 +265,7 @@ async def fuzzy_search_media(query, limit=80):
 
     candidates = []
     seen = set()
-    for collection in (media2,):
+    for collection in (media, media2):
         if collection is None:
             continue
         try:
@@ -337,9 +348,9 @@ async def search_media_with_filters(query, *, season=None, episode=None,
         except Exception as exc:
             return name, [], exc
 
-    configured = [("secondary", media2)] if media2 is not None else []
+    configured = [(n, c) for n, c in (("primary", media), ("secondary", media2)) if c is not None]
     if not configured:
-        raise RuntimeError("DATABASE_URI2 media database is not configured")
+        raise RuntimeError("No MongoDB database is configured")
     results = await asyncio.gather(*(fetch(n, c) for n, c in configured))
     docs, succeeded, errors, seen = [], 0, [], set()
     for name, rows, error in results:
