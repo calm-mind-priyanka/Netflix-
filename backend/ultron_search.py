@@ -132,11 +132,46 @@ class UltronSearchEngine:
         return [], None
 
     @staticmethod
-    def _build_groups(docs):
+    def _query_is_explicit_in_record(doc, title):
+        """Return True when the requested title tokens occur literally in the
+        raw AutoFilter record. This is the important Devil-compatible path:
+        the filename/caption is authoritative for discovery; the parser is
+        not allowed to invent a different title merely because release tags
+        were not recognized.
+        """
+        import html
+        raw = " ".join([
+            str(doc.get("file_name") or ""),
+            html.unescape(str(doc.get("caption") or "")),
+        ])
+        raw_norm = normalize_for_search(raw)
+        wanted = normalize_for_search(title)
+        if not raw_norm or not wanted:
+            return False
+        wanted_tokens = wanted.split()
+        raw_tokens = raw_norm.split()
+        if not wanted_tokens:
+            return False
+        for i in range(0, len(raw_tokens) - len(wanted_tokens) + 1):
+            if raw_tokens[i:i + len(wanted_tokens)] == wanted_tokens:
+                return True
+        return False
+
+    @classmethod
+    def _build_groups(cls, docs, canonical_title=None):
         builder = _CatalogBuilder()
         for doc in docs:
             try:
-                builder.add(doc)
+                # Devil AutoFilter does not require a perfect release-name
+                # parser to find a file. When the user's requested title is
+                # literally present in the raw Telegram record, keep that
+                # requested title as the logical identity. This prevents
+                # release tags such as HDR10Plus, 7280p, ESubs, uploader
+                # names, etc. from becoming separate VYRA titles.
+                forced = (canonical_title
+                          if canonical_title and cls._query_is_explicit_in_record(doc, canonical_title)
+                          else None)
+                builder.add(doc, forced_title=forced)
             except Exception:
                 LOGGER.exception("Catalog parse failure")
         return builder.finish()
@@ -164,7 +199,7 @@ class UltronSearchEngine:
             if not docs:
                 return []
 
-            groups = self._build_groups(docs)
+            groups = self._build_groups(docs, canonical_title=search_title)
             prepared = self.prepare_query(query)
             parsed = normalize_query(prepared)
             search_title = parsed.get("title") or correction or prepared

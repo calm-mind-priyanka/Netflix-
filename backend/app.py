@@ -648,7 +648,7 @@ async def _load_grouped_title(title_name, title_id=None, year_hint=None):
                             continue
                         if key:
                             seen.add(key)
-                        builder.add(doc)
+                        builder.add(doc, forced_title=name if title_id else None)
                     succeeded += 1
                 except Exception as exc:
                     errors.append(f"{db_name}: {type(exc).__name__}")
@@ -713,7 +713,7 @@ async def title(request):
                 continue
             target = next((item for item in cached_items if item.get("id") == title_id), None)
             if target and target.get("title"):
-                full = await _load_grouped_title(target.get("title"), None)
+                full = await _load_grouped_title(target.get("title"), target.get("id"), target.get("year"))
                 if full:
                     return web.json_response({"ok": True, **await enrich(full)})
         if requested_name:
