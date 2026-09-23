@@ -957,6 +957,12 @@ footer{
   color:#eaf3ff
 }
 .devilHeader strong{color:var(--blue)}
+.devilPosterCard{display:flex;gap:14px;margin:0 0 14px;padding:0 0 14px;border-bottom:1px solid rgba(255,255,255,.07)}
+.devilPoster{width:92px;height:132px;object-fit:cover;border-radius:10px;background:#0e1722;flex:0 0 auto}
+.devilPosterInfo{min-width:0;padding-top:2px}
+.devilPosterTitle{font-size:19px;font-weight:900;color:#fff;line-height:1.2}
+.devilPosterMeta{color:var(--muted);font-size:12px;margin-top:6px}
+.devilPosterDescription{color:#d6e0eb;font-size:12px;line-height:1.5;margin-top:9px;display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden}
 .devilFiles{display:grid;gap:2px}
 .devilFile{
   display:grid;
@@ -986,20 +992,6 @@ footer{
 .devilFileActions button{
   border:0;border-radius:7px;padding:6px 8px;color:#fff;font-weight:800;cursor:pointer
 }
-.devilWarning{
-  margin-top:12px;
-  border-left:4px solid #ef8b7f;
-  background:#30323a;
-  border-radius:8px;
-  padding:11px 10px;
-  display:grid;
-  grid-template-columns:auto 1fr auto;
-  gap:7px;
-  align-items:start;
-  color:#f2f2f2;
-  font-size:12px;
-  line-height:1.45
-}
 .devilButtons{
   display:grid;
   grid-template-columns:1fr 1fr;
@@ -1016,7 +1008,6 @@ footer{
   letter-spacing:.03em;
   cursor:pointer
 }
-.devilButtons .sendAll{grid-column:1/-1}
 .devilFilterMenu{
   display:grid;
   grid-template-columns:repeat(3,minmax(0,1fr));
@@ -1044,4 +1035,5 @@ footer{
   .devilFile{grid-template-columns:23px minmax(0,1fr);}
   .devilFileActions{grid-column:2}
   .devilFileActions button{padding:5px 9px}
+  .devilPoster{width:82px;height:118px}
 }
