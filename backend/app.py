@@ -573,6 +573,113 @@ async def search(request):
     })
 
 
+async def search_files(request):
+    """Devil/AutoFilter-style real-file search for the website.
+
+    Unlike the grouped title search, this endpoint keeps every matching real
+    media record separate. This is what the screenshot-style result panel needs:
+    if 20 real files match, the website gets those 20 real files, not 20 title
+    guesses and not synthetic combinations.
+    """
+    query = request.query.get("q", "").strip()
+    if not query:
+        return web.json_response({"ok": True, "files": [], "total": 0, "page": 0, "page_size": 10, "pages": 1,
+                                  "languages": [], "qualities": [], "seasons": [], "episodes": {}})
+
+    try:
+        page = max(0, int(request.query.get("page", "0")))
+    except ValueError:
+        page = 0
+    page_size = max(5, min(20, int(get_admin_setting("search", "results_per_page", default=10))))
+
+    prepared = ULTRON_SEARCH.prepare_query(query)
+    docs = await search_media(prepared, limit=SEARCH_MAX_DOCS)
+
+    # Keep the same Devil-style fallback semantics: correction is allowed only
+    # after the strict real-file search fails, and the corrected title is used
+    # only when it resolves back to real AutoFilter records.
+    corrected = None
+    if not docs and bool(get_admin_setting("search", "spell_check", default=True)):
+        fallback, corrected = await ULTRON_SEARCH._local_correction(query, SEARCH_MAX_DOCS)
+        docs = fallback
+        if not docs:
+            docs, corrected = await ULTRON_SEARCH._imdb_correct(query, SEARCH_MAX_DOCS)
+
+    parsed_files = []
+    seen = set()
+    for doc in docs:
+        item = parse_doc(doc)
+        if not item.get("file_id") or item.get("_parse_error"):
+            continue
+        fid = str(item["file_id"])
+        if fid in seen:
+            continue
+        seen.add(fid)
+        parsed_files.append(item)
+
+    # Query-level filters operate on the real parsed file records.
+    language = request.query.get("language", "").strip().casefold()
+    quality = request.query.get("quality", "").strip().casefold()
+    season = request.query.get("season", "").strip()
+    episode = request.query.get("episode", "").strip()
+
+    def quality_norm(v):
+        return re.sub(r"\s+", "", str(v or "")).casefold().rstrip("p")
+
+    filtered = []
+    for item in parsed_files:
+        if language and language not in {str(x).casefold() for x in (item.get("languages") or [])} and language not in str(item.get("language") or "").casefold():
+            continue
+        if quality and quality_norm(item.get("quality")) != quality_norm(quality):
+            continue
+        if season.isdigit() and item.get("season") != int(season):
+            continue
+        if episode.isdigit() and item.get("episode") != int(episode):
+            continue
+        filtered.append(item)
+
+    # Prefer the same practical ordering users see in AutoFilter: newest DB
+    # records first, while still making quality deterministic when available.
+    def sort_key(x):
+        m = re.search(r"\d+", str(x.get("quality") or ""))
+        qn = int(m.group(0)) if m else 0
+        return (str(x.get("file_name") or "").casefold(), qn)
+    filtered.sort(key=sort_key, reverse=True)
+
+    languages = sorted({str(x) for f in parsed_files for x in (f.get("languages") or [])
+                        if str(x).strip() and str(x).casefold() != "unknown"}, key=str.casefold)
+    qualities = sorted({str(f.get("quality")) for f in parsed_files if f.get("quality") and str(f.get("quality")).casefold() != "auto"},
+                       key=lambda x: (int(re.search(r"\d+", x).group()) if re.search(r"\d+", x) else 9999, x.casefold()))
+    seasons = sorted({int(f["season"]) for f in parsed_files if f.get("season") is not None})
+    episodes = {}
+    for f in parsed_files:
+        if f.get("season") is not None and f.get("episode") is not None:
+            episodes.setdefault(str(int(f["season"])), set()).add(int(f["episode"]))
+    episodes = {k: sorted(v) for k, v in episodes.items()}
+
+    total = len(filtered)
+    start = page * page_size
+    visible = filtered[start:start + page_size]
+    for f in visible:
+        # Useful to the browser without making title identity dependent on a
+        # displayed filename. The real file id remains authoritative.
+        f["display_index"] = start + visible.index(f) + 1
+
+    return web.json_response({
+        "ok": True,
+        "files": visible,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, (total + page_size - 1) // page_size),
+        "languages": languages,
+        "qualities": qualities,
+        "seasons": seasons,
+        "episodes": episodes,
+        "corrected_query": corrected,
+    })
+
+
 async def _cached_or_search_items(query):
     """Reuse a recent grouped search result for title/resolve requests."""
     key = re.sub(r"\s+", " ", str(query)).strip().casefold()
@@ -609,7 +716,7 @@ async def _load_grouped_title(title_name, title_id=None, year_hint=None):
     if not name:
         return None
 
-    cache_key = (normalize_for_search(name), int(year_hint) if year_hint is not None else None)
+    cache_key = (normalize_for_search(name), int(year_hint) if year_hint is not None else None, str(title_id or ""))
     now = time.time()
     cached = GROUP_CACHE.get(cache_key)
     if cached and now - cached[0] < GROUP_CACHE_TTL:
@@ -704,6 +811,95 @@ async def _load_grouped_title(title_name, title_id=None, year_hint=None):
     return value
 
 
+async def _resolve_group_robust(title_name="", title_id=None, year_hint=None):
+    """Resolve a real AutoFilter title without trusting a fragile display-title lookup.
+
+    First use the logical catalog/group cache. If that fails, fall back to the
+    actual AutoFilter records and rebuild the group from the records that really
+    exist. This prevents false ``Title not found`` responses caused by punctuation,
+    release-word differences, stale catalog identities, or an incomplete candidate
+    window.
+    """
+    name = str(title_name or "").strip()
+    tid = str(title_id or "").strip() or None
+
+    target = await _load_grouped_title(name, tid, year_hint) if name else None
+    if target:
+        return target
+
+    # If a stable catalog id was supplied, recover its stored identity first.
+    if tid and not name:
+        identity = await get_catalog_identity(tid)
+        if identity:
+            name = str(identity.get("title") or "").strip()
+            year_hint = identity.get("year") if year_hint is None else year_hint
+            target = await _load_grouped_title(name, tid, year_hint) if name else None
+            if target:
+                return target
+
+    if not name:
+        return None
+
+    prepared = _autofilter_prepare_query(name)
+    parsed = normalize_query(prepared)
+    search_title = parsed.get("title") or prepared
+    if not search_title:
+        return None
+
+    queries = []
+    for q in (name, prepared, search_title):
+        q = str(q or "").strip()
+        if q and q.casefold() not in {x.casefold() for x in queries}:
+            queries.append(q)
+
+    docs = []
+    async with SEARCH_SEMAPHORE:
+        for q in queries:
+            try:
+                docs = await search_media(q, limit=SEARCH_MAX_DOCS)
+            except Exception:
+                docs = []
+            if docs:
+                break
+        if not docs and bool(get_admin_setting("search", "fuzzy_fallback", default=True)):
+            try:
+                docs = await fuzzy_search_media(search_title, limit=min(80, SEARCH_MAX_DOCS))
+            except Exception:
+                docs = []
+
+    if not docs:
+        return None
+
+    builder = _CatalogBuilder()
+    for doc in docs:
+        try:
+            builder.add(doc)
+        except Exception:
+            LOGGER.debug("Robust title recovery skipped malformed media record", exc_info=True)
+    groups = builder.finish()
+    if not groups:
+        return None
+
+    wanted = normalize_for_search(search_title)
+    candidates = [g for g in groups if normalize_for_search(g.get("title")) == wanted]
+    if year_hint is not None:
+        year_candidates = [g for g in candidates if g.get("year") in (None, year_hint)]
+        if year_candidates:
+            candidates = year_candidates
+    if tid:
+        by_id = [g for g in groups if g.get("id") == tid]
+        if by_id:
+            candidates = by_id
+    if not candidates:
+        candidates = sorted(groups, key=lambda g: search_title_score(g.get("title"), search_title), reverse=True)
+        if not candidates or search_title_score(candidates[0].get("title"), search_title) < 0.60:
+            return None
+
+    target = candidates[0]
+    GROUP_CACHE[(normalize_for_search(target.get("title")), target.get("year"), str(target.get("id") or ""))] = (time.time(), target)
+    return target
+
+
 async def title(request):
     title_id = request.match_info["id"]
     requested_name = request.query.get("q", "").strip()
@@ -711,36 +907,39 @@ async def title(request):
     if identity:
         requested_name = str(identity.get("title") or requested_name).strip()
 
-    # Search results are raw Auto Filter file records. When the search UI
-    # opens the first result automatically, resolve that raw id back to its
-    # logical VYRA title instead of treating the file id as a catalog id.
+    # Raw-file ids are accepted too. Recover the real media record directly and
+    # then rebuild its logical title. This is the final guard against a false
+    # Title-not-found response when the Telegram/AutoFilter file exists.
     if str(title_id).startswith("file:"):
-        for _key, (stamp, cached_items) in list(SEARCH_CACHE.items()):
-            if time.time() - stamp >= SEARCH_CACHE_TTL:
-                continue
-            target = next((item for item in cached_items if item.get("id") == title_id), None)
-            if target and target.get("title"):
-                full = await _load_grouped_title(target.get("title"), None)
+        raw_id = str(title_id)[5:]
+        try:
+            doc = await find_media(raw_id, _SEARCH_PROJECTION)
+        except Exception:
+            doc = None
+        if doc:
+            parsed = parse_doc(doc)
+            if parsed.get("title"):
+                full = await _resolve_group_robust(parsed["title"], None, parsed.get("year"))
                 if full:
                     return web.json_response({"ok": True, **await enrich(full)})
-        if requested_name:
-            full = await _load_grouped_title(requested_name, None)
-            if full:
-                return web.json_response({"ok": True, **await enrich(full)})
-        raise web.HTTPNotFound(text="Title not found")
 
-    if requested_name:
-        target = await _load_grouped_title(requested_name, title_id if identity else None, identity.get("year") if identity else None)
-        if target:
-            return web.json_response({"ok": True, **await enrich(target)})
+    target = await _resolve_group_robust(
+        requested_name,
+        title_id if identity else None,
+        identity.get("year") if identity else None,
+    )
+    if target:
+        return web.json_response({"ok": True, **await enrich(target)})
 
-    # Deep links without q can still be resolved from a recent search cache.
+    # Deep links without q can still be recovered from recent search caches.
     for _key, (stamp, cached_items) in list(SEARCH_CACHE.items()):
         if time.time() - stamp >= SEARCH_CACHE_TTL:
             continue
-        target = next((item for item in cached_items if item.get("id") == title_id), None)
-        if target:
-            full = await _load_grouped_title(target.get("title"), title_id, target.get("year"))
+        cached_target = next((item for item in cached_items if item.get("id") == title_id), None)
+        if cached_target:
+            full = await _resolve_group_robust(
+                cached_target.get("title"), title_id, cached_target.get("year")
+            )
             if full:
                 return web.json_response({"ok": True, **await enrich(full)})
 
@@ -773,7 +972,7 @@ async def filter_options(request):
     if not title_name and not title_id:
         raise web.HTTPBadRequest(text="A title or title id is required")
 
-    target=await _load_grouped_title(title_name, title_id) if title_name else None
+    target=await _resolve_group_robust(title_name, title_id) if (title_name or title_id) else None
     if not target:
         raise web.HTTPNotFound(text="Title not found")
 
@@ -947,7 +1146,7 @@ async def resolve(request):
         "source": request.query.get("source", "").strip() or None,
         "language": request.query.get("audio", "").strip() or None,
     }
-    grouped_target = await _load_grouped_title(title_name)
+    grouped_target = await _resolve_group_robust(title_name)
     parsed = []
     if grouped_target:
         if grouped_target.get("type") == "series":
@@ -1464,6 +1663,7 @@ def create_app():
     app.router.add_get("/api/diagnostics", diagnostics)
     app.router.add_get("/api/home", home)
     app.router.add_get("/api/search", search)
+    app.router.add_get("/api/search-files", search_files)
     app.router.add_get("/api/title/{id}", title)
     app.router.add_get("/api/filter-options", filter_options)
     app.router.add_get("/api/filter", filter_media)
