@@ -821,7 +821,7 @@ async function search(
     const items=d.items||[];
 
     window._searchPageSize=
-      Number(d.page_size||20);
+      10;
 
     window._searchQuery=q;
 
