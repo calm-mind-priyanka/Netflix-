@@ -772,6 +772,22 @@ footer{
   margin:12px 0 8px
 }
 
+/* Keep the result list together; filter controls belong BELOW the files,
+   matching the AutoFilter/Telegram layout shown by the user. */
+.afControls{
+  margin-top:14px;
+  padding-top:12px;
+  border-top:1px solid rgba(255,255,255,.08);
+}
+
+.afControlsTitle{
+  color:var(--muted);
+  font-size:11px;
+  font-weight:850;
+  letter-spacing:.12em;
+  margin-bottom:7px;
+}
+
 .afOpen{
   border:1px solid #315a7d;
   background:#0d2236;
@@ -883,6 +899,33 @@ footer{
   border-color:var(--blue)
 }
 
+
+.afNotice{
+  margin:12px 0 0;
+  padding:10px 12px;
+  border-left:4px solid #f0a35b;
+  border-radius:8px;
+  background:rgba(240,163,91,.12);
+  color:#f1f3f6;
+  font-size:12px;
+  font-weight:700;
+  line-height:1.45;
+}
+
+.sendAllFiles{
+  width:100%;
+  margin-top:10px;
+  padding:11px 12px;
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:#10263a;
+  color:#fff;
+  font-weight:850;
+  letter-spacing:.04em;
+}
+
+.sendAllFiles:active{transform:translateY(1px)}
+
 /* Website account / payment additions */
 .accountOverlay{position:fixed;inset:0;z-index:1000;background:rgba(3,8,15,.88);backdrop-filter:blur(10px);display:grid;place-items:center;padding:18px}
 .accountModal{width:min(460px,100%);background:var(--panel,#0c1b2b);border:1px solid rgba(255,255,255,.12);border-radius:20px;padding:24px;box-shadow:0 25px 80px rgba(0,0,0,.45)}
@@ -898,3 +941,107 @@ footer{
 .profileGrid>div{padding:12px;border:1px solid rgba(255,255,255,.08);border-radius:10px}
 .profileGrid small,.profileGrid strong{display:block}.profileGrid small{opacity:.6;margin-bottom:5px}.profileGrid strong{word-break:break-word}
 .paymentBox{padding:14px;border:1px solid rgba(255,255,255,.1);border-radius:12px;margin-bottom:14px}.mono{font-family:ui-monospace,monospace;word-break:break-all}
+
+/* Devil/AutoFilter-style search result panel */
+.devilSearchPanel{
+  background:#172535;
+  border:1px solid rgba(255,255,255,.08);
+  border-radius:16px;
+  padding:14px 14px 12px;
+  box-shadow:0 8px 24px rgba(0,0,0,.18)
+}
+.devilHeader{
+  padding:4px 2px 14px;
+  font-size:15px;
+  font-weight:800;
+  color:#eaf3ff
+}
+.devilHeader strong{color:var(--blue)}
+.devilFiles{display:grid;gap:2px}
+.devilFile{
+  display:grid;
+  grid-template-columns:28px minmax(0,1fr) auto;
+  gap:6px;
+  align-items:start;
+  padding:9px 2px;
+  border-bottom:1px solid rgba(255,255,255,.045)
+}
+.devilFileNo{font-size:15px;font-weight:900;color:#fff;padding-top:1px}
+.devilFileBody{min-width:0}
+.devilFileName{
+  display:block;
+  width:100%;
+  text-align:left;
+  border:0;
+  padding:0;
+  background:transparent;
+  color:#72b9ff;
+  font-weight:800;
+  font-size:14px;
+  line-height:1.42;
+  cursor:pointer
+}
+.devilFileMeta{color:var(--muted);font-size:11px;margin-top:4px;line-height:1.35}
+.devilFileActions{display:flex;gap:4px}
+.devilFileActions button{
+  border:0;border-radius:7px;padding:6px 8px;color:#fff;font-weight:800;cursor:pointer
+}
+.devilWarning{
+  margin-top:12px;
+  border-left:4px solid #ef8b7f;
+  background:#30323a;
+  border-radius:8px;
+  padding:11px 10px;
+  display:grid;
+  grid-template-columns:auto 1fr auto;
+  gap:7px;
+  align-items:start;
+  color:#f2f2f2;
+  font-size:12px;
+  line-height:1.45
+}
+.devilButtons{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:7px;
+  margin-top:12px
+}
+.devilButtons button,.devilFilterMenu button{
+  min-height:42px;
+  border:0;
+  border-radius:9px;
+  background:#203448;
+  color:#fff;
+  font-weight:850;
+  letter-spacing:.03em;
+  cursor:pointer
+}
+.devilButtons .sendAll{grid-column:1/-1}
+.devilFilterMenu{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:6px;
+  padding:9px 0 2px
+}
+.devilFilterMenu button{min-height:36px;font-size:12px}
+.devilFilterTitle{grid-column:1/-1;color:var(--muted);font-size:11px;font-weight:800;letter-spacing:.08em}
+.devilPager{
+  display:grid;
+  grid-template-columns:1fr auto 1fr;
+  gap:8px;
+  align-items:center;
+  margin-top:12px
+}
+.devilPager button{
+  border:0;border-radius:9px;background:#203448;color:#fff;font-weight:800;padding:11px 10px
+}
+.devilPager button:last-child{text-align:center}
+.devilPager span{text-align:center;color:#fff;font-weight:800;min-width:48px}
+.devilPager button:disabled{opacity:.35}
+.devilEmpty,.devilLoading{padding:18px 5px;text-align:center;color:var(--muted);font-size:13px}
+@media(max-width:520px){
+  .devilSearchPanel{padding:12px}
+  .devilFile{grid-template-columns:23px minmax(0,1fr);}
+  .devilFileActions{grid-column:2}
+  .devilFileActions button{padding:5px 9px}
+}
