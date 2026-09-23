@@ -243,21 +243,27 @@ function renderSearchCard(item){
     </div>
 
     <div class="afHint">
-      Choose Language, Quality, Season
-      or Episode — exactly like an
-      AutoFilter result.
-    </div>
-
-    <div class="afFilters">
-      <span class="muted">
-        Loading filters…
-      </span>
+      Real matching files from the AutoFilter catalog.
     </div>
 
     <div class="afMatches">
       <span class="muted">
         Loading files…
       </span>
+    </div>
+
+    <div class="afNotice">
+      ⚠️ THIS MESSAGE WILL BE AUTO DELETE AFTER 2 MINUTES TO AVOID COPYRIGHT ISSUES 🗑
+    </div>
+
+    <div class="afControls">
+      <div class="afControlsTitle">FILTERS</div>
+      <div class="afFilters">
+        <span class="muted">
+          Loading filters…
+        </span>
+      </div>
+      <button class="sendAllFiles" type="button">SEND ALL FILES</button>
     </div>
   `;
 
@@ -269,6 +275,21 @@ function renderSearchCard(item){
 
   row._pageSize=
     window._searchPageSize||20;
+
+  row.querySelector('.sendAllFiles').onclick=async()=>{
+    const state=row._filterState||{};
+    const q=new URLSearchParams({id:item.id,title:item.title});
+    if(state.language) q.set('language',state.language);
+    if(state.quality) q.set('quality',state.quality);
+    if(state.season) q.set('season',state.season);
+    if(state.episode) q.set('episode',state.episode);
+    try{
+      const d=await API.get('/api/filter?'+q.toString());
+      const files=d.matches||[];
+      if(!files.length){ toast('No real files match the selected filters.'); return; }
+      for(const f of files){ await selectAndAccess(f,'download'); }
+    }catch(e){ toast(e.message); }
+  };
 
   loadInlineFilters(item,row);
 
@@ -643,30 +664,12 @@ function renderMatches(
         []
       ).join(', ');
 
+    const fileNumber=page*max+i+1;
+    const fileSize=f.file_size?formatBytes(f.file_size):'';
     el.innerHTML=`
       <div>
-
-        <strong>
-          ${esc(
-            f.file_name||
-            `File ${page*max+i+1}`
-          )}
-        </strong>
-
-        <small>
-          ${esc(
-            [
-              langs,
-              f.quality,
-              f.file_size
-                ?formatBytes(f.file_size)
-                :''
-            ]
-            .filter(Boolean)
-            .join(' • ')
-          )}
-        </small>
-
+        <strong>${fileNumber}. [${esc(fileSize||'Unknown size')}] ${esc(f.file_name||`File ${fileNumber}`)}</strong>
+        <small>${esc([langs,f.quality].filter(Boolean).join(' • '))}</small>
       </div>
 
       <div class="matchActions">
@@ -792,114 +795,140 @@ function selectAndAccess(
 }
 
 
-async function search(
-  q,
-  page=0
-){
+function renderDevilFile(f, index){
+  const el=document.createElement('div');
+  el.className='devilFile';
+  const size=f.file_size?formatBytes(f.file_size):'';
+  const meta=[
+    f.quality,
+    (f.languages||f.audio_languages||[]).join(' + '),
+    f.source,
+    size
+  ].filter(Boolean).join(' • ');
+  el.innerHTML=`
+    <div class="devilFileNo">${index}.</div>
+    <div class="devilFileBody">
+      <button class="devilFileName" type="button">[${esc(size||'FILE')}] ${esc(f.file_name||'Media')}</button>
+      <div class="devilFileMeta">${esc(meta)}</div>
+    </div>
+    <div class="devilFileActions">
+      <button class="watch" type="button">▶</button>
+      <button class="download" type="button">⬇</button>
+    </div>`;
+  const open=()=>selectAndAccess(f,'watch');
+  el.querySelector('.devilFileName').onclick=open;
+  el.querySelector('.watch').onclick=open;
+  el.querySelector('.download').onclick=()=>selectAndAccess(f,'download');
+  return el;
+}
 
-  q=(q||'').trim();
+function renderDevilSearch(data, q){
+  const panel=document.createElement('section');
+  panel.className='devilSearchPanel';
+  panel._query=q;
+  panel._page=Number(data.page||0);
+  panel._filters={language:'',quality:'',season:'',episode:''};
 
-  if(!q)return;
+  panel.innerHTML=`
+    <div class="devilHeader"><span>📁 HERE I FOUND FOR YOUR SEARCH <strong>${esc(q)}</strong></span></div>
+    <div class="devilFiles"></div>
+    <div class="devilWarning"><span>⚠️</span><strong>THIS MESSAGE WILL BE AUTO DELETE AFTER 2 MINUTES TO AVOID COPYRIGHT ISSUES 🗑️</strong><span>”</span></div>
+    <div class="devilButtons">
+      <button data-kind="language">LANGUAGE</button>
+      <button data-kind="quality">QUALITY</button>
+      <button data-kind="season">SEASON</button>
+      <button class="sendAll">SEND ALL FILES</button>
+    </div>
+    <div class="devilPager"></div>
+  `;
+  panel._data=data;
+  renderDevilFiles(panel,data);
+  panel.querySelectorAll('.devilButtons [data-kind]').forEach(b=>{
+    b.onclick=()=>showDevilFilterMenu(panel,b.dataset.kind);
+  });
+  panel.querySelector('.sendAll').onclick=()=>{
+    panel._page=0;
+    panel._filters={language:'',quality:'',season:'',episode:''};
+    loadDevilFiles(panel);
+  };
+  return panel;
+}
 
-  show('searchSection');
-
-  $('resultTitle').textContent=
-    `Searching “${q}”…`;
-
-  $('results').innerHTML=
-    '<p class="muted">Searching the real catalog…</p>';
-
-  try{
-
-    const d=
-      await API.get(
-        `/api/search?q=${
-          encodeURIComponent(q)
-        }&page=${page}`
-      );
-
-    const items=d.items||[];
-
-    window._searchPageSize=
-      10;
-
-    window._searchQuery=q;
-
-    window._searchTotal=
-      Number(
-        d.total||
-        d.count||
-        0
-      );
-
-    $('resultTitle').textContent=
-      `${window._searchTotal} result${
-        window._searchTotal===1?'':'s'
-      } found`;
-
-    $('results').innerHTML='';
-
-    if(!items.length){
-
-      $('results').innerHTML=
-        '<p class="muted">Nothing found. Try a simpler title or spelling.</p>';
-
-      return;
-    }
-
-    items.forEach(
-      item=>
-        $('results').append(
-          renderSearchCard(item)
-        )
-    );
-
-    const pages=
-      Math.ceil(
-        window._searchTotal/
-        window._searchPageSize
-      );
-
-    if(pages>1){
-
-      const nav=
-        document.createElement('div');
-
-      nav.className=
-        'pager searchPager';
-
-      for(let i=0;i<pages;i++){
-
-        const b=
-          document.createElement('button');
-
-        b.type='button';
-
-        b.className=
-          `pageBtn ${
-            i===page?'active':''
-          }`;
-
-        b.textContent=i+1;
-
-        b.onclick=
-          ()=>search(q,i);
-
-        nav.append(b);
-      }
-
-      $('results').append(nav);
-    }
-
-  }catch(e){
-
-    $('results').innerHTML=
-      `<p class="muted">
-        ${esc(e.message)}
-      </p>`;
+function renderDevilFiles(panel,data){
+  const box=panel.querySelector('.devilFiles');
+  box.innerHTML='';
+  const files=data.files||[];
+  const start=Number(data.page||0)*Number(data.page_size||10);
+  if(!files.length){
+    box.innerHTML='<div class="devilEmpty">❌ No real files found for this search/filter.</div>';
+  }else{
+    files.forEach((f,i)=>box.append(renderDevilFile(f,start+i+1)));
+  }
+  const pager=panel.querySelector('.devilPager');
+  pager.innerHTML='';
+  const pages=Number(data.pages||1), page=Number(data.page||0);
+  if(pages>1){
+    const prev=document.createElement('button'); prev.textContent='‹ PREV'; prev.disabled=page<=0;
+    prev.onclick=()=>{panel._page=page-1;loadDevilFiles(panel)};
+    const count=document.createElement('span'); count.textContent=`${page+1}/${pages}`;
+    const next=document.createElement('button'); next.textContent='NEXT ›'; next.disabled=page>=pages-1;
+    next.onclick=()=>{panel._page=page+1;loadDevilFiles(panel)};
+    pager.append(prev,count,next);
+  }else{
+    pager.innerHTML=`<span>1/1</span>`;
   }
 }
 
+function showDevilFilterMenu(panel,kind){
+  const values=kind==='language'?panel._data.languages:kind==='quality'?panel._data.qualities:panel._data.seasons;
+  const old=panel.querySelector('.devilFilterMenu');
+  if(old) old.remove();
+  const menu=document.createElement('div'); menu.className='devilFilterMenu';
+  const title=kind==='language'?'LANGUAGE':kind==='quality'?'QUALITY':'SEASON';
+  menu.innerHTML=`<div class="devilFilterTitle">${title}</div>`;
+  const all=document.createElement('button'); all.textContent='ALL'; all.onclick=()=>{panel._filters[kind]='';panel._filters.episode='';menu.remove();loadDevilFiles(panel)}; menu.append(all);
+  (values||[]).forEach(v=>{
+    const b=document.createElement('button'); b.textContent=kind==='season'?`S${String(v).padStart(2,'0')}`:v;
+    b.onclick=()=>{panel._filters[kind]=kind==='season'?String(v):String(v); if(kind==='season')panel._filters.episode=''; menu.remove(); loadDevilFiles(panel)}; menu.append(b);
+  });
+  panel.querySelector('.devilButtons').after(menu);
+}
+
+async function loadDevilFiles(panel){
+  const q=new URLSearchParams({q:panel._query,page:String(panel._page||0)});
+  const f=panel._filters||{};
+  if(f.language)q.set('language',f.language);
+  if(f.quality)q.set('quality',f.quality);
+  if(f.season)q.set('season',f.season);
+  if(f.episode)q.set('episode',f.episode);
+  const box=panel.querySelector('.devilFiles');
+  box.innerHTML='<div class="devilLoading">Finding real Telegram files…</div>';
+  try{
+    const d=await API.get('/api/search-files?'+q.toString());
+    panel._data=d;
+    renderDevilFiles(panel,d);
+  }catch(e){box.innerHTML=`<div class="devilEmpty">${esc(e.message)}</div>`;}
+}
+
+
+async function search(q,page=0){
+  q=(q||'').trim();
+  if(!q)return;
+  show('searchSection');
+  $('resultTitle').textContent=`Searching “${q}”…`;
+  $('results').innerHTML='<p class="muted">Searching the real AutoFilter catalog…</p>';
+  try{
+    const d=await API.get(`/api/search-files?q=${encodeURIComponent(q)}&page=${page}`);
+    window._searchQuery=q;
+    window._searchTotal=Number(d.total||0);
+    $('resultTitle').textContent=`${window._searchTotal} result${window._searchTotal===1?'':'s'} found`;
+    $('results').innerHTML='';
+    const panel=renderDevilSearch(d,q);
+    $('results').append(panel);
+  }catch(e){
+    $('results').innerHTML=`<p class="muted">${esc(e.message)}</p>`;
+  }
+}
 
 async function openTitle(item){
 
