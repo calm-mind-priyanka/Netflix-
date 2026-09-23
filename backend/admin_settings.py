@@ -36,14 +36,16 @@ DEFAULT_SETTINGS = {
         "shortlink_mode": "enabled",
     },
     "search": {
-        "max_results": 200,
-        "results_per_page": 20,
+        "max_results": 1500,
+        "results_per_page": 10,
         "result_mode": "buttons",
         "imdb_poster": False,
-        "fuzzy_fallback": True,
-        "external_correction": False,
+        # Devil parity: strict real-file search first. Local fuzzy matching can
+        # manufacture a title grouping that the bot itself would not return.
+        "fuzzy_fallback": False,
+        "external_correction": True,
         "spell_check": True,
-        "candidate_limit": 120,
+        "candidate_limit": 1500,
         "search_cache_ttl": 30,
         "search_cache_max": 256,
         "search_concurrency": 3,

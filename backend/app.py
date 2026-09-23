@@ -484,21 +484,27 @@ async def _search_uncached(query):
 async def search(request):
     query = request.query.get("q", "").strip()
     if not query:
-        return web.json_response({"ok": True, "items": [], "count": 0, "total": 0, "page": 0, "page_size": 20})
+        return web.json_response({"ok": True, "items": [], "count": 0, "total": 0, "page": 0, "page_size": 10})
 
-    # ``max_results`` is the total retained search set; ``results_per_page``
-    # controls only what the browser displays. This is the important
-    # AutoFilter behavior: pagination must not throw away the remaining
-    # matches, because the user may still filter/open any of them.
-    max_results = max(1, int(get_admin_setting("search", "max_results", default=200)))
-    page_size = max(10, min(50, int(get_admin_setting("search", "results_per_page", default=20))))
+    # Website behavior is fixed to ten visible results per page.  This is the
+    # web equivalent of Devil's configurable result window: page 1 shows 1-10,
+    # and the next page continues with the remaining real matches.
+    max_results = max(10, min(SEARCH_MAX_DOCS, int(SEARCH_MAX_DOCS)))
+    page_size = 10
     try:
         page = max(0, int(request.query.get("page", "0")))
     except ValueError:
         page = 0
-    candidate_limit = max(20, min(500, int(get_admin_setting("search", "candidate_limit", default=120))))
-    fuzzy = bool(get_admin_setting("search", "fuzzy_fallback", default=True)) and bool(get_admin_setting("search", "spell_check", default=True))
-    external = bool(get_admin_setting("search", "external_correction", default=True))
+    candidate_limit = max(10, min(SEARCH_MAX_DOCS, int(SEARCH_MAX_DOCS)))
+    # Strict real-file search is the default.  If it returns nothing, the
+    # Devil-style spell-check path may try an external title correction, but
+    # only the corrected title is accepted if real AutoFilter files exist.
+    spell_check = bool(get_admin_setting("search", "spell_check", default=True))
+    # Keep the primary website result set strict like Devil.  Local fuzzy
+    # matching is deliberately disabled; spell-check correction is allowed only
+    # after strict search returns nothing, exactly as the bot's fallback path.
+    fuzzy = False
+    external = spell_check
     ttl = max(1, int(get_admin_setting("search", "search_cache_ttl", default=30)))
     global ULTRON_SEARCH_CONCURRENCY
     desired_concurrency = max(1, min(16, int(get_admin_setting("search", "search_concurrency", default=3))))
@@ -660,16 +666,24 @@ async def _load_grouped_title(title_name, title_id=None, year_hint=None):
                 )
 
             items = builder.finish()
-            wanted = normalize_for_search(name)
-            exact = [item for item in items if normalize_for_search(item.get("title")) == wanted]
-            if year_hint is not None:
-                year_exact = [item for item in exact if item.get("year") in (None, year_hint)]
-                if year_exact:
-                    exact = year_exact
-            value = exact[0] if exact else next(
-                (item for item in items if search_title_score(item.get("title"), name) >= 0.90),
-                None,
-            )
+
+            # The result id is authoritative.  Several real releases can share
+            # the same display title (e.g. same-name movies/years), and choosing
+            # the first title before checking the id caused "Title not found" on
+            # the filter panel even though the file existed.
+            value = next((item for item in items if title_id and item.get("id") == title_id), None)
+
+            if value is None:
+                wanted = normalize_for_search(name)
+                exact = [item for item in items if normalize_for_search(item.get("title")) == wanted]
+                if year_hint is not None:
+                    year_exact = [item for item in exact if item.get("year") in (None, year_hint)]
+                    if year_exact:
+                        exact = year_exact
+                value = exact[0] if exact else next(
+                    (item for item in items if search_title_score(item.get("title"), name) >= 0.90),
+                    None,
+                )
             if value:
                 GROUP_CACHE[cache_key] = (time.time(), value)
                 GROUP_CACHE.move_to_end(cache_key)
@@ -783,19 +797,20 @@ async def filter_options(request):
         if item.get("season") is not None
     }
 
+    # Only expose options backed by at least one real Telegram/AutoFilter
+    # record. Never show a fabricated language or quality button.
     languages=sorted(set(
         str(value)
         for variant in variants
         for value in (variant.get("audio_languages") or variant.get("languages") or [])
-        if value
-    ), key=str.casefold) or FILTER_LANGUAGES
+        if value and str(value).strip().casefold() != "unknown"
+    ), key=str.casefold)
 
     qualities=sorted(set(
         str(variant.get("quality")).strip()
         for variant in variants
         if variant.get("quality") and str(variant.get("quality")).strip().lower()!="auto"
     ), key=lambda value: (int(re.search(r"\d+",value).group()) if re.search(r"\d+",value) else 9999, value.casefold()))
-    qualities=qualities or FILTER_QUALITIES
     captions=sorted(set(
         str(value) for variant in variants
         for value in (variant.get("subtitle_languages") or [])

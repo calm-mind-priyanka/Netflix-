@@ -2,8 +2,8 @@
 
 Design goals taken from the supplied AutoFilter/Ultron source:
 - normal bounded Mongo search first;
-- local fuzzy correction second;
-- one short IMDb/Cinemagoer correction only when normal/local search fails;
+- optional external spell correction only after strict search fails;
+- no local fuzzy correction in the normal path;
 - never invent a result: an external candidate is accepted only after the
   real AutoFilter Mongo collection contains matching media;
 - season/episode tokens are navigation context, not catalog identity;
@@ -58,14 +58,12 @@ class UltronSearchEngine:
         prepared = self.prepare_query(query)
         if not prepared:
             return []
-        parsed = normalize_query(prepared)
-        title = parsed.get("title") or prepared
-        year = parsed.get("year")
-        base = title + (f" {year}" if year else "")
+        # Devil's get_search_results searches the complete cleaned request,
+        # including SxxEyy/year/language/quality tokens when the user supplied
+        # them. Keep those tokens in the real-file lookup so an episode request
+        # cannot accidentally return unrelated episodes.
         async with self.semaphore:
-            docs = await search_media(base, limit=limit)
-            if not docs and base.casefold() != title.casefold():
-                docs = await search_media(title, limit=limit)
+            docs = await search_media(prepared, limit=limit)
         return docs
 
     async def _local_correction(self, query, limit):
@@ -141,7 +139,7 @@ class UltronSearchEngine:
                 LOGGER.exception("Catalog parse failure")
         return builder.finish()
 
-    async def search(self, query, *, candidate_limit=120, max_results=10,
+    async def search(self, query, *, candidate_limit=1500, max_results=1500,
                      fuzzy=True, external_correction=True):
         key = self._key(query)
         now = time.time()

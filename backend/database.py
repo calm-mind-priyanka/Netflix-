@@ -159,11 +159,12 @@ def build_search_filter(query):
     pattern = _autofilter_regex(query)
     if not pattern:
         return None
+    # Devil AutoFilter searches its Media collection by file_name.
+    # Keep the website's primary search on the same real source field so a
+    # caption-only match can never create a website result that Devil would not
+    # return.
     return {
-        "$or": [
-            {"file_name": {"$regex": pattern, "$options": "i"}},
-            {"caption": {"$regex": pattern, "$options": "i"}},
-        ]
+        "file_name": {"$regex": pattern, "$options": "i"}
     }
 
 
