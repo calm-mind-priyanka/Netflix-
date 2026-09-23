@@ -657,6 +657,23 @@ async def search_files(request):
             episodes.setdefault(str(int(f["season"])), set()).add(int(f["episode"]))
     episodes = {k: sorted(v) for k, v in episodes.items()}
 
+    # Attach one movie/series identity block to the result panel. The real
+    # Telegram files remain the source of truth; TMDB is only used for the
+    # poster/description presentation, matching the AutoFilter-style poster
+    # shown above the file list.
+    poster = next((str(f.get("poster") or "") for f in filtered if f.get("poster")), "")
+    first = filtered[0] if filtered else (parsed_files[0] if parsed_files else None)
+    panel_title = str((first or {}).get("title") or query).strip()
+    panel_type = (first or {}).get("type") or "movie"
+    panel_year = (first or {}).get("year")
+    description = ""
+    if bool(get_admin_setting("metadata", "tmdb_enabled", default=True)) and TMDB_API_KEY and first:
+        if not poster or not description:
+            meta = await tmdb_meta(panel_title, panel_type, panel_year)
+            poster = poster or str(meta.get("poster") or "")
+            description = str(meta.get("description") or "")
+            panel_year = panel_year or meta.get("year")
+
     total = len(filtered)
     start = page * page_size
     visible = filtered[start:start + page_size]
@@ -677,6 +694,11 @@ async def search_files(request):
         "seasons": seasons,
         "episodes": episodes,
         "corrected_query": corrected,
+        "title": panel_title,
+        "type": panel_type,
+        "year": panel_year,
+        "poster": poster,
+        "description": description,
     })
 
 
