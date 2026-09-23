@@ -831,27 +831,40 @@ function renderDevilSearch(data, q){
 
   panel.innerHTML=`
     <div class="devilHeader"><span>📁 HERE I FOUND FOR YOUR SEARCH <strong>${esc(q)}</strong></span></div>
+    <div class="devilPosterCard"></div>
     <div class="devilFiles"></div>
-    <div class="devilWarning"><span>⚠️</span><strong>THIS MESSAGE WILL BE AUTO DELETE AFTER 2 MINUTES TO AVOID COPYRIGHT ISSUES 🗑️</strong><span>”</span></div>
     <div class="devilButtons">
       <button data-kind="language">LANGUAGE</button>
       <button data-kind="quality">QUALITY</button>
       <button data-kind="season">SEASON</button>
-      <button class="sendAll">SEND ALL FILES</button>
     </div>
     <div class="devilPager"></div>
   `;
   panel._data=data;
+  renderDevilMeta(panel,data,q);
   renderDevilFiles(panel,data);
   panel.querySelectorAll('.devilButtons [data-kind]').forEach(b=>{
     b.onclick=()=>showDevilFilterMenu(panel,b.dataset.kind);
   });
-  panel.querySelector('.sendAll').onclick=()=>{
-    panel._page=0;
-    panel._filters={language:'',quality:'',season:'',episode:''};
-    loadDevilFiles(panel);
-  };
   return panel;
+}
+
+function renderDevilMeta(panel,data,q){
+  const box=panel.querySelector('.devilPosterCard');
+  if(!box) return;
+  const poster=data.poster||'';
+  const title=data.title||q;
+  const description=data.description||'';
+  const year=data.year?` • ${data.year}`:'';
+  const type=data.type==='series'?'Series':'Movie';
+  if(!poster && !description){ box.innerHTML=''; return; }
+  box.innerHTML=`
+    ${poster?`<img class="devilPoster" src="${esc(poster)}" alt="${esc(title)} poster" loading="eager">`:''}
+    <div class="devilPosterInfo">
+      <div class="devilPosterTitle">${esc(title)}</div>
+      <div class="devilPosterMeta">${esc(type+year)}</div>
+      ${description?`<div class="devilPosterDescription">${esc(description)}</div>`:''}
+    </div>`;
 }
 
 function renderDevilFiles(panel,data){
@@ -869,10 +882,10 @@ function renderDevilFiles(panel,data){
   const pages=Number(data.pages||1), page=Number(data.page||0);
   if(pages>1){
     const prev=document.createElement('button'); prev.textContent='‹ PREV'; prev.disabled=page<=0;
-    prev.onclick=()=>{panel._page=page-1;loadDevilFiles(panel)};
+    prev.onclick=()=>{const y=window.scrollY;panel._page=page-1;loadDevilFiles(panel,y)};
     const count=document.createElement('span'); count.textContent=`${page+1}/${pages}`;
     const next=document.createElement('button'); next.textContent='NEXT ›'; next.disabled=page>=pages-1;
-    next.onclick=()=>{panel._page=page+1;loadDevilFiles(panel)};
+    next.onclick=()=>{const y=window.scrollY;panel._page=page+1;loadDevilFiles(panel,y)};
     pager.append(prev,count,next);
   }else{
     pager.innerHTML=`<span>1/1</span>`;
@@ -886,15 +899,15 @@ function showDevilFilterMenu(panel,kind){
   const menu=document.createElement('div'); menu.className='devilFilterMenu';
   const title=kind==='language'?'LANGUAGE':kind==='quality'?'QUALITY':'SEASON';
   menu.innerHTML=`<div class="devilFilterTitle">${title}</div>`;
-  const all=document.createElement('button'); all.textContent='ALL'; all.onclick=()=>{panel._filters[kind]='';panel._filters.episode='';menu.remove();loadDevilFiles(panel)}; menu.append(all);
+  const all=document.createElement('button'); all.textContent='ALL'; all.onclick=()=>{const y=window.scrollY;panel._filters[kind]='';panel._filters.episode='';menu.remove();loadDevilFiles(panel,y)}; menu.append(all);
   (values||[]).forEach(v=>{
     const b=document.createElement('button'); b.textContent=kind==='season'?`S${String(v).padStart(2,'0')}`:v;
-    b.onclick=()=>{panel._filters[kind]=kind==='season'?String(v):String(v); if(kind==='season')panel._filters.episode=''; menu.remove(); loadDevilFiles(panel)}; menu.append(b);
+    b.onclick=()=>{const y=window.scrollY; panel._filters[kind]=kind==='season'?String(v):String(v); if(kind==='season')panel._filters.episode=''; menu.remove(); loadDevilFiles(panel,y)}; menu.append(b);
   });
   panel.querySelector('.devilButtons').after(menu);
 }
 
-async function loadDevilFiles(panel){
+async function loadDevilFiles(panel,restoreY=null){
   const q=new URLSearchParams({q:panel._query,page:String(panel._page||0)});
   const f=panel._filters||{};
   if(f.language)q.set('language',f.language);
@@ -906,7 +919,11 @@ async function loadDevilFiles(panel){
   try{
     const d=await API.get('/api/search-files?'+q.toString());
     panel._data=d;
+    renderDevilMeta(panel,d,panel._query);
     renderDevilFiles(panel,d);
+    if(restoreY!==null){
+      requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo({top:restoreY,left:0,behavior:'instant'})));
+    }
   }catch(e){box.innerHTML=`<div class="devilEmpty">${esc(e.message)}</div>`;}
 }
 
