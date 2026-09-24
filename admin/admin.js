@@ -19,7 +19,13 @@ async function saveSettings(buttonId, payload, message){
 }
 
 function renderPlans(plans=[]){
-  $('plansList').innerHTML = plans.map(p=>`<div class="request"><b>${esc(p.name)}</b> — ₹${esc(p.price_inr)} <span class="muted">(${esc(p.id)}, ${esc(p.days)} days)</span></div>`).join('') || '<p class="muted">No premium plans configured.</p>';
+  $('plansList').innerHTML = plans.map(p=>`
+    <div class="request planEditor">
+      <b>${esc(p.name)}</b>
+      <span class="muted">${esc(p.id)} • ${esc(p.days)} days</span>
+      <label>Price ₹<input type="number" min="1" max="100000" data-plan-price="${esc(p.id)}" value="${esc(p.price_inr)}"></label>
+    </div>
+  `).join('') || '<p class="muted">No premium plans configured.</p>';
   $('premiumPlan').innerHTML = plans.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} — ₹${esc(p.price_inr)}</option>`).join('');
 }
 
@@ -60,7 +66,13 @@ $('savePayments').onclick=async()=>{
   setBusy('savePayments',true);
   try{
     const qr=await qrDataUrl();
-    const payments={activation_mode:val('activationMode'),premium_bypass_verification:$('premiumBypass').checked,manual_enabled:$('manualEnabled').checked,upi_id:val('upiId'),manual_instructions:val('paymentInstructions')};
+    const plans={};
+    document.querySelectorAll('[data-plan-price]').forEach(input=>{
+      const id=input.dataset.planPrice;
+      const price=Math.max(1,Number(input.value||0));
+      if(id) plans[id]={price_inr:price};
+    });
+    const payments={activation_mode:val('activationMode'),premium_bypass_verification:$('premiumBypass').checked,manual_enabled:$('manualEnabled').checked,upi_id:val('upiId'),manual_instructions:val('paymentInstructions'),plans};
     if(qr) payments.manual_qr=qr;
     await api('/admin/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({payments})});
     $('qrUpload').value=''; notice('Payment settings saved to MongoDB.','success'); await loadSettings();
@@ -163,6 +175,8 @@ async function loadHistory(uidOverride=null, page=1){
     const uid=uidOverride!==null?uidOverride:val('historyUserId').trim();
     const qs=new URLSearchParams({page:String(page),limit:String(pageSize)});
     if(uid)qs.set('user_id',uid);
+    const eventType=val('historyEventType').trim();
+    if(eventType)qs.set('event_type',eventType);
     const d=await api('/admin/api/history?'+qs.toString());
     historyPage=d.page||1;
     setHistoryVisible(true);
