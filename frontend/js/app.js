@@ -477,7 +477,7 @@ function renderInlineGroups(
     .forEach(btn=>{
 
       btn.onclick=async()=>{
-        const restoreY=window.scrollY;
+        const restoreY=preserveScrollY();
 
         const k=
           btn.dataset.filter;
@@ -521,9 +521,7 @@ function renderInlineGroups(
             opt
           );
         }
-        requestAnimationFrame(()=>requestAnimationFrame(()=>{
-          window.scrollTo({top:restoreY,left:0,behavior:'instant'});
-        }));
+        restoreScrollY(restoreY);
       };
     });
 }
@@ -741,7 +739,7 @@ function renderMatches(
       b.textContent=i+1;
 
       b.onclick=()=>{
-        const restoreY=window.scrollY;
+        const restoreY=preserveScrollY();
         row._page=i;
 
         renderMatches(
@@ -751,7 +749,7 @@ function renderMatches(
           item,
           opt
         );
-        requestAnimationFrame(()=>window.scrollTo({top:restoreY,left:0,behavior:'instant'}));
+        restoreScrollY(restoreY);
       };
 
       nav.append(b);
@@ -1312,7 +1310,7 @@ function renderDetailMatches(
       b.textContent=i+1;
 
       b.onclick=()=>{
-        const restoreY=window.scrollY;
+        const restoreY=preserveScrollY();
         row._page=i;
 
         renderDetailMatches(
@@ -1321,7 +1319,7 @@ function renderDetailMatches(
           row,
           item
         );
-        requestAnimationFrame(()=>window.scrollTo({top:restoreY,left:0,behavior:'instant'}));
+        restoreScrollY(restoreY);
       };
 
       nav.append(b);
@@ -1448,15 +1446,7 @@ function openVerify(
       }
     };
 
-  $('buyPremiumFromVerify').onclick=
-    ()=>{
-      hide('verify');
-      show('premiumSection');
-      $('premiumSection').scrollIntoView({
-        behavior:'smooth',
-        block:'start'
-      });
-    };
+  $('buyPremiumFromVerify').onclick=()=>{ hide('verify'); openPremiumPanel(); };
 
   show('verify');
 }
@@ -1964,6 +1954,35 @@ $('manualSubmit').onclick=
 
 
 
+
+function preserveScrollY(){
+  return Math.max(0, window.scrollY || window.pageYOffset || 0);
+}
+function restoreScrollY(y){
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    window.scrollTo({top:y,left:0,behavior:'auto'});
+  }));
+}
+function openPremiumPanel(){
+  show('premiumSection');
+  loadPremium();
+  const y=preserveScrollY();
+  setTimeout(()=>{
+    const el=$('premiumSection');
+    if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
+  },30);
+}
+function openVerificationFromTop(){
+  if(!currentFile){
+    toast('Open a movie/series result and choose a real file first.');
+    const y=preserveScrollY();
+    $('searchSection')?.scrollIntoView({behavior:'smooth',block:'start'});
+    restoreScrollY(Math.max(0,y));
+    return;
+  }
+  access('watch');
+}
+
 /* =========================
    WEBSITE ACCOUNT
    ========================= */
@@ -2145,14 +2164,8 @@ $('homeBtn').onclick=
     });
   };
 
-$('premiumBtn').onclick=
-  ()=>{
-    show('premiumSection');
-    $('premiumSection').scrollIntoView({
-      behavior:'smooth',
-      block:'start'
-    });
-  };
+$('premiumBtn').addEventListener('click',e=>{e.preventDefault();e.stopPropagation();openPremiumPanel();});
+$('verifyTopBtn')?.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();openVerificationFromTop();});
 
 document
   .querySelectorAll('[data-close]')
