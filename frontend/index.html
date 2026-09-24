@@ -9,7 +9,7 @@
 </head>
 <body>
 <div id="app" class="app hidden">
-<header class="topbar"><button class="wordmark" id="homeBtn">VYRA</button><div class="topActions"><button id="accountBtn" class="topLink">Account</button><button id="premiumBtn" class="topLink premiumTop">✦ Premium</button><button id="searchBtn" class="searchIcon" aria-label="Search">⌕</button></div></header>
+<header class="topbar"><button class="wordmark" id="homeBtn">VYRA</button><div class="topActions"><button id="accountBtn" class="topLink">Account</button><button id="verifyTopBtn" class="topLink verifyTop">✓ Verify</button><button id="premiumBtn" class="topLink premiumTop">✦ Premium</button><button id="searchBtn" class="searchIcon" aria-label="Search">⌕</button></div></header>
 <main id="main">
 <section class="welcome"><p class="eyebrow">FAST • SIMPLE • REAL FILES</p><h1>Find it. Pick it. <span>Play it.</span></h1><p>Search the AutoFilter catalog without the heavy OTT clutter.</p><div class="searchMini"><input id="homeQuery" placeholder="Search movie, series, season or episode…" autocomplete="off"><button id="homeSearch">Search</button></div></section>
 <section id="searchSection" class="section hidden"><div class="sectionHead"><div><p class="eyebrow">AUTOFILTER SEARCH</p><h2 id="resultTitle">Results</h2></div><button id="clearSearch" class="ghost">Clear</button></div><div id="results" class="textList"></div></section>
@@ -33,15 +33,23 @@
 </ul>
 </div><div id="premiumPlans" class="plans"></div><div id="manualPay" class="manual hidden"><div class="paymentBox"><strong>Manual UPI payment</strong><p id="manualInstructions"></p><p id="manualUpi" class="mono"></p><img id="manualQr" class="manualQr hidden" alt="Payment QR"></div><div class="upload"><label>Premium plan<select id="manualPlan"></select></label><label>UTR / Payment reference<input id="premiumUtr" maxlength="80" placeholder="Enter UTR/reference number"></label><label>Payment screenshot<input id="premiumProof" type="file" accept="image/png,image/jpeg,image/webp"></label><textarea id="premiumNote" placeholder="Optional note"></textarea><button id="manualSubmit">Submit proof</button></div><p id="manualState"></p><div id="manualHistory" class="manualHistory"></div></div></section>
 <section class="section siteNotice" id="siteNotice">
-  <div class="sectionHead compact"><div><p class="eyebrow">SITE NOTICE</p><h2>About this website</h2></div></div>
-  <div class="noticeCard">
-    <p><strong>Publicly available information:</strong> This website is a search and discovery interface. Titles, descriptions, artwork, ratings, and other metadata may come from publicly accessible sources and third-party services.</p>
-    <p>Availability can change at any time. We do not guarantee that a particular title, language, quality, season, episode, artwork, or metadata will always be available.</p>
-    <p>Please use content and services only where you have the appropriate rights or permission. Third-party names, trademarks, artwork, and metadata remain the property of their respective owners.</p>
-  </div>
+  <details class="aboutWebsite">
+    <summary><span><span class="eyebrow">SITE NOTICE</span><strong>About this website</strong></span><span class="aboutChevron" aria-hidden="true">⌄</span></summary>
+    <div class="noticeCard">
+      <p><strong>Publicly available information:</strong> This website is a search and discovery interface. Titles, descriptions, artwork, ratings, and other metadata may come from publicly accessible sources and third-party services.</p>
+      <p>Availability can change at any time. We do not guarantee that a particular title, language, quality, season, episode, artwork, or metadata will always be available.</p>
+      <p>Please use content and services only where you have the appropriate rights or permission. Third-party names, trademarks, artwork, and metadata remain the property of their respective owners.</p>
+    </div>
+  </details>
 </section>
 </main>
-<footer><span>VYRA</span><span>Light by design • Built for fast catalog search</span></footer>
+<footer class="siteFooter">
+  <div class="footerBrand">
+    <strong>VYRALight</strong>
+    <span>by design <i aria-hidden="true">•</i> Built for fast catalog search</span>
+  </div>
+  <div class="footerNotice"><span>© 2026 VYRALight</span></div>
+</footer>
 </div>
 <div id="detail" class="overlay hidden"><div class="drawer"><button class="close" data-close="detail">×</button><div id="detailBody"></div></div></div>
 <div id="verify" class="overlay hidden"><div class="modal"><button class="close" data-close="verify">×</button><p class="eyebrow">ACCESS CHECK</p><h2>Verification required</h2><p id="verifyText">Verification is required before this file can be opened.</p><div class="verifyActions"><a id="verifyLink" class="primary" target="_blank" rel="noopener">Start verification</a><a id="tutorialLink" class="secondary hidden" target="_blank" rel="noopener">How to verify</a><button id="verifyRefresh" class="secondary">Check again</button><button id="buyPremiumFromVerify" class="secondary">Buy Premium</button></div><p id="verifyState" class="muted"></p></div></div>
