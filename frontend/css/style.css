@@ -1037,3 +1037,23 @@ footer{
   .devilFileActions button{padding:5px 9px}
   .devilPoster{width:82px;height:118px}
 }
+
+
+.premiumBenefits{
+  margin:16px 0 20px;
+  padding:16px 18px;
+  border:1px solid rgba(35,140,255,.22);
+  border-radius:16px;
+  background:linear-gradient(135deg,rgba(35,140,255,.08),rgba(255,255,255,.025));
+}
+.premiumBenefits h3{margin:0 0 10px;font-size:15px;letter-spacing:.02em}
+.premiumBenefits ul{margin:0;padding:0;list-style:none;display:grid;gap:7px;color:#dce8f5;font-size:13px}
+.premiumBenefits li{line-height:1.45}
+.premiumTop{border-color:rgba(35,140,255,.5)!important;background:rgba(35,140,255,.1)!important;font-weight:800}
+.planEditor{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center}
+.planEditor label{display:flex;align-items:center;gap:6px}
+.planEditor input{width:110px}
+@media(max-width:640px){.planEditor{grid-template-columns:1fr}.planEditor label{justify-content:space-between}}
+\n.devilFilterBack{font-weight:800!important;opacity:.85}\n
+
+.siteNotice{padding-bottom:18px}.noticeCard{border:1px solid var(--line,#243244);border-radius:18px;padding:18px;background:rgba(255,255,255,.025);color:var(--muted,#9aa8ba);line-height:1.65}.noticeCard p{margin:0 0 10px}.noticeCard p:last-child{margin-bottom:0}.noticeCard strong{color:var(--text,#f4f7fb)}
