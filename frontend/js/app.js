@@ -477,6 +477,7 @@ function renderInlineGroups(
     .forEach(btn=>{
 
       btn.onclick=async()=>{
+        const restoreY=window.scrollY;
 
         const k=
           btn.dataset.filter;
@@ -520,6 +521,9 @@ function renderInlineGroups(
             opt
           );
         }
+        requestAnimationFrame(()=>requestAnimationFrame(()=>{
+          window.scrollTo({top:restoreY,left:0,behavior:'instant'});
+        }));
       };
     });
 }
@@ -737,6 +741,7 @@ function renderMatches(
       b.textContent=i+1;
 
       b.onclick=()=>{
+        const restoreY=window.scrollY;
         row._page=i;
 
         renderMatches(
@@ -746,6 +751,7 @@ function renderMatches(
           item,
           opt
         );
+        requestAnimationFrame(()=>window.scrollTo({top:restoreY,left:0,behavior:'instant'}));
       };
 
       nav.append(b);
@@ -856,13 +862,15 @@ function renderDevilMeta(panel,data,q){
   const title=data.title||q;
   const description=data.description||'';
   const year=data.year?` • ${data.year}`:'';
+  const season=data.requested_season?` • S${String(data.requested_season).padStart(2,'0')}`:'';
+  const rating=(data.rating!==null && data.rating!==undefined && Number(data.rating)>0)?` • Rating ${Number(data.rating).toFixed(1)}`:'';
   const type=data.type==='series'?'Series':'Movie';
   if(!poster && !description){ box.innerHTML=''; return; }
   box.innerHTML=`
     ${poster?`<img class="devilPoster" src="${esc(poster)}" alt="${esc(title)} poster" loading="eager">`:''}
     <div class="devilPosterInfo">
       <div class="devilPosterTitle">${esc(title)}</div>
-      <div class="devilPosterMeta">${esc(type+year)}</div>
+      <div class="devilPosterMeta">${esc(type+year+season+rating)}</div>
       ${description?`<div class="devilPosterDescription">${esc(description)}</div>`:''}
     </div>`;
 }
@@ -899,6 +907,7 @@ function showDevilFilterMenu(panel,kind){
   const menu=document.createElement('div'); menu.className='devilFilterMenu';
   const title=kind==='language'?'LANGUAGE':kind==='quality'?'QUALITY':'SEASON';
   menu.innerHTML=`<div class="devilFilterTitle">${title}</div>`;
+  const back=document.createElement('button'); back.className='devilFilterBack'; back.textContent='‹ BACK'; back.onclick=()=>menu.remove(); menu.append(back);
   const all=document.createElement('button'); all.textContent='ALL'; all.onclick=()=>{const y=window.scrollY;panel._filters[kind]='';panel._filters.episode='';menu.remove();loadDevilFiles(panel,y)}; menu.append(all);
   (values||[]).forEach(v=>{
     const b=document.createElement('button'); b.textContent=kind==='season'?`S${String(v).padStart(2,'0')}`:v;
@@ -1303,6 +1312,7 @@ function renderDetailMatches(
       b.textContent=i+1;
 
       b.onclick=()=>{
+        const restoreY=window.scrollY;
         row._page=i;
 
         renderDetailMatches(
@@ -1311,6 +1321,7 @@ function renderDetailMatches(
           row,
           item
         );
+        requestAnimationFrame(()=>window.scrollTo({top:restoreY,left:0,behavior:'instant'}));
       };
 
       nav.append(b);
@@ -1440,11 +1451,11 @@ function openVerify(
   $('buyPremiumFromVerify').onclick=
     ()=>{
       hide('verify');
-
-      $('premiumSection')
-        .scrollIntoView({
-          behavior:'smooth'
-        });
+      show('premiumSection');
+      $('premiumSection').scrollIntoView({
+        behavior:'smooth',
+        block:'start'
+      });
     };
 
   show('verify');
@@ -2135,11 +2146,13 @@ $('homeBtn').onclick=
   };
 
 $('premiumBtn').onclick=
-  ()=>
-    $('premiumSection')
-      .scrollIntoView({
-        behavior:'smooth'
-      });
+  ()=>{
+    show('premiumSection');
+    $('premiumSection').scrollIntoView({
+      behavior:'smooth',
+      block:'start'
+    });
+  };
 
 document
   .querySelectorAll('[data-close]')
