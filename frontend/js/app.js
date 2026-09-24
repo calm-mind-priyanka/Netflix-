@@ -500,6 +500,14 @@ function renderInlineGroups(
 
         row._page=0;
 
+        let nextOpt=opt;
+        try{
+          const params=new URLSearchParams({id:item.id,title:item.title});
+          Object.entries(state).forEach(([key,value])=>{ if(value) params.set(key,value); });
+          nextOpt=await API.get(`/api/filter-options?${params.toString()}`);
+          opt.languages=nextOpt.languages; opt.qualities=nextOpt.qualities; opt.seasons=nextOpt.seasons; opt.episodes=nextOpt.episodes; opt.captions=nextOpt.captions;
+        }catch(_){ /* keep the previously loaded real options */ }
+
         renderInlineGroups(
           container,
           buildFilterGroups(opt,state),
@@ -510,16 +518,9 @@ function renderInlineGroups(
         );
 
         if(row===$('detailBody')){
-          await applyDetailFilter(
-            item,
-            row
-          );
+          await applyDetailFilter(item,row);
         }else{
-          await applyInlineFilter(
-            item,
-            row,
-            opt
-          );
+          await applyInlineFilter(item,row,opt);
         }
         restoreScrollY(restoreY);
       };
@@ -841,6 +842,7 @@ function renderDevilSearch(data, q){
       <button data-kind="language">LANGUAGE</button>
       <button data-kind="quality">QUALITY</button>
       <button data-kind="season">SEASON</button>
+      <button data-kind="episode">EPISODE</button>
     </div>
     <div class="devilPager"></div>
   `;
@@ -899,17 +901,17 @@ function renderDevilFiles(panel,data){
 }
 
 function showDevilFilterMenu(panel,kind){
-  const values=kind==='language'?panel._data.languages:kind==='quality'?panel._data.qualities:panel._data.seasons;
+  const values=kind==='language'?panel._data.languages:kind==='quality'?panel._data.qualities:kind==='season'?panel._data.seasons:(panel._data.episodes?.[String(panel._filters?.season||'')]||Object.values(panel._data.episodes||{}).flat());
   const old=panel.querySelector('.devilFilterMenu');
   if(old) old.remove();
   const menu=document.createElement('div'); menu.className='devilFilterMenu';
-  const title=kind==='language'?'LANGUAGE':kind==='quality'?'QUALITY':'SEASON';
+  const title=kind==='language'?'LANGUAGE':kind==='quality'?'QUALITY':kind==='season'?'SEASON':'EPISODE';
   menu.innerHTML=`<div class="devilFilterTitle">${title}</div>`;
   const back=document.createElement('button'); back.className='devilFilterBack'; back.textContent='‹ BACK'; back.onclick=()=>menu.remove(); menu.append(back);
   const all=document.createElement('button'); all.textContent='ALL'; all.onclick=()=>{const y=window.scrollY;panel._filters[kind]='';panel._filters.episode='';menu.remove();loadDevilFiles(panel,y)}; menu.append(all);
   (values||[]).forEach(v=>{
-    const b=document.createElement('button'); b.textContent=kind==='season'?`S${String(v).padStart(2,'0')}`:v;
-    b.onclick=()=>{const y=window.scrollY; panel._filters[kind]=kind==='season'?String(v):String(v); if(kind==='season')panel._filters.episode=''; menu.remove(); loadDevilFiles(panel,y)}; menu.append(b);
+    const b=document.createElement('button'); b.textContent=kind==='season'?`S${String(v).padStart(2,'0')}`:kind==='episode'?`E${String(v).padStart(2,'0')}`:v;
+    b.onclick=()=>{const y=window.scrollY; panel._filters[kind]=String(v); if(kind==='season')panel._filters.episode=''; menu.remove(); loadDevilFiles(panel,y)}; menu.append(b);
   });
   panel.querySelector('.devilButtons').after(menu);
 }
@@ -956,6 +958,7 @@ async function search(q,page=0){
 
 async function openTitle(item){
 
+  window.__detailReturnY=preserveScrollY();
   try{
 
     const d=
@@ -990,6 +993,7 @@ function renderDetail(d){
 
   const html=`
     <div class="detail">
+      <button id="detailBack" class="ghost" type="button">‹ Back to results</button>
 
       <p class="detailKicker">
         ${
@@ -1032,6 +1036,11 @@ function renderDetail(d){
   `;
 
   $('detailBody').innerHTML=html;
+  $('detailBack')?.addEventListener('click',()=>{
+    const y=window.__detailReturnY ?? preserveScrollY();
+    hide('detail');
+    restoreScrollY(y);
+  });
 
   const item={
     id:d.id,
@@ -1446,7 +1455,7 @@ function openVerify(
       }
     };
 
-  $('buyPremiumFromVerify').onclick=()=>{ hide('verify'); openPremiumPanel(); };
+  $('buyPremiumFromVerify').onclick=()=>{ hide('verify'); void openPremiumPanel(); };
 
   show('verify');
 }
@@ -1587,11 +1596,10 @@ async function loadPremium(){
     }
 
   }catch(e){
-
-    toast(
-      `Premium could not be loaded: ${e.message}`
-    );
+    toast(`Premium could not be loaded: ${e.message}`);
+    throw e;
   }
+  return true;
 }
 
 
@@ -1868,7 +1876,7 @@ $('manualSubmit').onclick=
 
     fd.append('plan_id', plan);
 
-    fd.append('utr', utr);
+    fd.append('utr', $('premiumUtr').value.trim());
 
     fd.append(
       'note',
@@ -1963,14 +1971,17 @@ function restoreScrollY(y){
     window.scrollTo({top:y,left:0,behavior:'auto'});
   }));
 }
-function openPremiumPanel(){
-  show('premiumSection');
-  loadPremium();
+async function openPremiumPanel(){
+  const section=$('premiumSection');
+  if(!section){ toast('Premium section is unavailable.'); return; }
+  section.classList.remove('hidden');
+  section.setAttribute('aria-hidden','false');
+  premiumButton?.setAttribute('aria-expanded','true');
   const y=preserveScrollY();
-  setTimeout(()=>{
-    const el=$('premiumSection');
-    if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
-  },30);
+  try{ await loadPremium(); }catch(_){ /* loadPremium already reports the error */ }
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    section.scrollIntoView({behavior:'smooth',block:'start'});
+  }));
 }
 function openVerificationFromTop(){
   if(!currentFile){
@@ -2164,7 +2175,15 @@ $('homeBtn').onclick=
     });
   };
 
-$('premiumBtn').addEventListener('click',e=>{e.preventDefault();e.stopPropagation();openPremiumPanel();});
+const premiumButton=$('premiumBtn');
+if(premiumButton){
+  premiumButton.type='button';
+  premiumButton.addEventListener('click',e=>{
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    void openPremiumPanel();
+  });
+}
 $('verifyTopBtn')?.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();openVerificationFromTop();});
 
 document
