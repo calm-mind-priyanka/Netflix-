@@ -9,7 +9,7 @@
 </head>
 <body>
 <div id="app" class="app hidden">
-<header class="topbar"><button class="wordmark" id="homeBtn">VYRA</button><div class="topActions"><button id="accountBtn" class="topLink">Account</button><button id="premiumBtn" class="topLink">Premium</button><button id="searchBtn" class="searchIcon" aria-label="Search">⌕</button></div></header>
+<header class="topbar"><button class="wordmark" id="homeBtn">VYRA</button><div class="topActions"><button id="accountBtn" class="topLink">Account</button><button id="premiumBtn" class="topLink premiumTop">✦ Premium</button><button id="searchBtn" class="searchIcon" aria-label="Search">⌕</button></div></header>
 <main id="main">
 <section class="welcome"><p class="eyebrow">FAST • SIMPLE • REAL FILES</p><h1>Find it. Pick it. <span>Play it.</span></h1><p>Search the AutoFilter catalog without the heavy OTT clutter.</p><div class="searchMini"><input id="homeQuery" placeholder="Search movie, series, season or episode…" autocomplete="off"><button id="homeSearch">Search</button></div></section>
 <section id="searchSection" class="section hidden"><div class="sectionHead"><div><p class="eyebrow">AUTOFILTER SEARCH</p><h2 id="resultTitle">Results</h2></div><button id="clearSearch" class="ghost">Clear</button></div><div id="results" class="textList"></div></section>
@@ -19,7 +19,27 @@
 <div class="split"><div><div class="sectionHead compact"><h2>Movies</h2></div><div id="movies" class="nameList"></div></div><div><div class="sectionHead compact"><h2>Web Series</h2></div><div id="series" class="nameList"></div></div></div>
 <div class="sectionHead compact"><h2>Categories</h2></div><div id="categories" class="categoryList"></div>
 </section>
-<section id="premiumSection" class="section premiumSection"><div class="sectionHead"><div><p class="eyebrow">ACCESS</p><h2>Premium</h2></div><span id="premiumBadge" class="badge">FREE</span></div><p id="premiumCopy">Premium can remove verification checks when enabled by the admin.</p><div id="premiumPlans" class="plans"></div><div id="manualPay" class="manual hidden"><div class="paymentBox"><strong>Manual UPI payment</strong><p id="manualInstructions"></p><p id="manualUpi" class="mono"></p><img id="manualQr" class="manualQr hidden" alt="Payment QR"></div><div class="upload"><label>Premium plan<select id="manualPlan"></select></label><label>UTR / Payment reference<input id="premiumUtr" maxlength="80" placeholder="Enter UTR/reference number"></label><label>Payment screenshot<input id="premiumProof" type="file" accept="image/png,image/jpeg,image/webp"></label><textarea id="premiumNote" placeholder="Optional note"></textarea><button id="manualSubmit">Submit proof</button></div><p id="manualState"></p><div id="manualHistory" class="manualHistory"></div></div></section>
+<section id="premiumSection" class="section premiumSection hidden"><div class="sectionHead"><div><p class="eyebrow">ACCESS</p><h2>Premium</h2></div><span id="premiumBadge" class="badge">FREE</span></div><p id="premiumCopy">Premium can remove verification checks when enabled by the admin.</p><div id="premiumBenefits" class="premiumBenefits">
+<h3>🎁 ᴘʀᴇᴍɪᴜᴍ ғᴇᴀᴛᴜʀᴇ ʙᴇɴᴇғɪᴛs</h3>
+<ul>
+<li>❏ ɴᴏ ɴᴇᴇᴅ ᴛᴏ ᴏᴘᴇɴ ʟɪɴᴋs</li>
+<li>❏ ɢᴇᴛ ᴅɪʀᴇᴄᴛ ғɪʟᴇs</li>
+<li>❏ ᴀᴅ-ғʀᴇᴇ ᴇxᴘᴇʀɪᴇɴᴄᴇ</li>
+<li>❏ ʜɪɢʜ-sᴘᴇᴇᴅ ᴅᴏᴡɴʟᴏᴀᴅ ʟɪɴᴋ</li>
+<li>❏ ᴍᴜʟᴛɪ-ᴘʟᴀʏᴇʀ sᴛʀᴇᴀᴍɪɴɢ ʟɪɴᴋs</li>
+<li>❏ ᴜɴʟɪᴍɪᴛᴇᴅ ᴍᴏᴠɪᴇs ᴀɴᴅ sᴇʀɪᴇs</li>
+<li>❏ ꜰᴜʟʟ ᴀᴅᴍɪɴ sᴜᴘᴘᴏʀᴛ</li>
+<li>❏ ʀᴇǫᴜᴇsᴛs ᴄᴀɴ ʙᴇ ᴄᴏᴍᴘʟᴇᴛᴇᴅ ɪɴ 𝟷ʜ ɪꜰ ᴀᴠᴀɪʟᴀʙʟᴇ</li>
+</ul>
+</div><div id="premiumPlans" class="plans"></div><div id="manualPay" class="manual hidden"><div class="paymentBox"><strong>Manual UPI payment</strong><p id="manualInstructions"></p><p id="manualUpi" class="mono"></p><img id="manualQr" class="manualQr hidden" alt="Payment QR"></div><div class="upload"><label>Premium plan<select id="manualPlan"></select></label><label>UTR / Payment reference<input id="premiumUtr" maxlength="80" placeholder="Enter UTR/reference number"></label><label>Payment screenshot<input id="premiumProof" type="file" accept="image/png,image/jpeg,image/webp"></label><textarea id="premiumNote" placeholder="Optional note"></textarea><button id="manualSubmit">Submit proof</button></div><p id="manualState"></p><div id="manualHistory" class="manualHistory"></div></div></section>
+<section class="section siteNotice" id="siteNotice">
+  <div class="sectionHead compact"><div><p class="eyebrow">SITE NOTICE</p><h2>About this website</h2></div></div>
+  <div class="noticeCard">
+    <p><strong>Publicly available information:</strong> This website is a search and discovery interface. Titles, descriptions, artwork, ratings, and other metadata may come from publicly accessible sources and third-party services.</p>
+    <p>Availability can change at any time. We do not guarantee that a particular title, language, quality, season, episode, artwork, or metadata will always be available.</p>
+    <p>Please use content and services only where you have the appropriate rights or permission. Third-party names, trademarks, artwork, and metadata remain the property of their respective owners.</p>
+  </div>
+</section>
 </main>
 <footer><span>VYRA</span><span>Light by design • Built for fast catalog search</span></footer>
 </div>
