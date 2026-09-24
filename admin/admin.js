@@ -21,12 +21,13 @@ async function saveSettings(buttonId, payload, message){
 function renderPlans(plans=[]){
   $('plansList').innerHTML = plans.map(p=>`
     <div class="request planEditor">
-      <b>${esc(p.name)}</b>
-      <span class="muted">${esc(p.id)} • ${esc(p.days)} days</span>
+      <div><b>${esc(p.name)}</b><span class="muted">${esc(p.id)}</span></div>
+      <label>Name <input type="text" maxlength="40" data-plan-name="${esc(p.id)}" value="${esc(p.name)}"></label>
+      <label>Days <input type="number" min="1" max="3650" data-plan-days="${esc(p.id)}" value="${esc(p.days)}"></label>
       <label>Price ₹<input type="number" min="1" max="100000" data-plan-price="${esc(p.id)}" value="${esc(p.price_inr)}"></label>
     </div>
   `).join('') || '<p class="muted">No premium plans configured.</p>';
-  $('premiumPlan').innerHTML = plans.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} — ₹${esc(p.price_inr)}</option>`).join('');
+  $('premiumPlan').innerHTML = plans.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} — ${esc(p.days)} days — ₹${esc(p.price_inr)}</option>`).join('');
 }
 
 async function loadSettings(){
@@ -70,7 +71,9 @@ $('savePayments').onclick=async()=>{
     document.querySelectorAll('[data-plan-price]').forEach(input=>{
       const id=input.dataset.planPrice;
       const price=Math.max(1,Number(input.value||0));
-      if(id) plans[id]={price_inr:price};
+      const days=Math.max(1,Number(document.querySelector(`[data-plan-days="${CSS.escape(id)}"]`)?.value||1));
+      const name=(document.querySelector(`[data-plan-name="${CSS.escape(id)}"]`)?.value||'').trim();
+      if(id) plans[id]={price_inr:price,days,name};
     });
     const payments={activation_mode:val('activationMode'),premium_bypass_verification:$('premiumBypass').checked,manual_enabled:$('manualEnabled').checked,upi_id:val('upiId'),manual_instructions:val('paymentInstructions'),plans};
     if(qr) payments.manual_qr=qr;
@@ -204,5 +207,23 @@ $('clearHistory').onclick=async()=>{
     notice(`Cleared ${d.deleted||0} history event(s).`,'success');await loadHistory(uid,1);
   }catch(e){notice(`Clear history failed: ${e.message}`,'error');}
 };
+
+async function loadVerificationTrace(){
+  try{
+    const uid=val('verificationUserId').trim();
+    const eventType=val('verificationStageFilter');
+    const qs=new URLSearchParams({page:'1',limit:'100'});
+    if(uid)qs.set('user_id',uid);
+    if(eventType)qs.set('event_type',eventType);
+    else {
+      // Load the recent history and keep only genuine verification-success events.
+    }
+    const d=await api('/admin/api/history?'+qs.toString());
+    const rows=(d.history||[]).filter(x=>String(x.event_type||'').startsWith('VERIFICATION_STAGE_') && String(x.event_type||'').endsWith('_SUCCESS'));
+    $('verificationSummary').textContent=`${rows.length} successful verification event${rows.length===1?'':'s'} shown${uid?` for ${uid}`:''}.`;
+    $('verificationTrace').innerHTML=rows.length?rows.map(h=>{const m=h.metadata||{};const stage=m.stage||String(h.event_type).match(/STAGE_(\d+)/)?.[1]||'?';const final=m.final?' • Final stage':'';return `<div class="request"><b>Stage ${esc(stage)} completed${final}</b> — <code>${esc(h.user_id||'')}</code><br><small>${new Date((h.created_at||0)*1000).toLocaleString()} • Cycle expires ${m.cycle_expires_at?new Date(m.cycle_expires_at*1000).toLocaleString():'—'}</small></div>`}).join(''):'<p class="muted">No successful verification records found.</p>';
+  }catch(e){notice(`Verification trace: ${e.message}`,'error');}
+}
+$('loadVerificationTrace')?.addEventListener('click',loadVerificationTrace);
 
 (async()=>{try{await loadSettings();}catch(e){notice(e.message,'error');}})();
