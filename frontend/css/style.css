@@ -1057,3 +1057,30 @@ footer{
 \n.devilFilterBack{font-weight:800!important;opacity:.85}\n
 
 .siteNotice{padding-bottom:18px}.noticeCard{border:1px solid var(--line,#243244);border-radius:18px;padding:18px;background:rgba(255,255,255,.025);color:var(--muted,#9aa8ba);line-height:1.65}.noticeCard p{margin:0 0 10px}.noticeCard p:last-child{margin-bottom:0}.noticeCard strong{color:var(--text,#f4f7fb)}
+
+/* V2 interaction and footer polish */
+.verifyTop{border-color:rgba(86,205,142,.42)!important;background:rgba(86,205,142,.08)!important;font-weight:800}
+.siteFooter{margin-top:28px;padding:24px 0 48px;display:grid;grid-template-columns:1fr auto;gap:18px;align-items:center;border-top:1px solid rgba(255,255,255,.07)}
+.footerBrand{display:grid;gap:5px}.footerBrand strong{font-size:15px;letter-spacing:.18em}.footerBrand span,.footerNotice{font-size:11px;color:var(--muted);line-height:1.55}.footerNotice{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:7px 14px;text-align:right}.footerNotice span{padding-left:12px;border-left:1px solid rgba(255,255,255,.1)}
+.premiumSection{scroll-margin-top:86px}.premiumTop{box-shadow:0 0 0 1px rgba(35,140,255,.08),0 8px 28px rgba(35,140,255,.08)}
+.verifyTop{box-shadow:0 0 0 1px rgba(86,205,142,.06),0 8px 24px rgba(86,205,142,.06)}
+@media(max-width:640px){.siteFooter{grid-template-columns:1fr;padding-bottom:34px}.footerNotice{justify-content:flex-start;text-align:left}.footerNotice span{border-left:0;padding-left:0}.topActions{gap:5px}.topLink{padding:8px 9px;font-size:12px}}
+
+/* V4: polished VYRALight footer + collapsed About information */
+.siteNotice{padding-top:8px;padding-bottom:10px}
+.aboutWebsite{border:1px solid rgba(255,255,255,.08);border-radius:16px;background:rgba(255,255,255,.018);overflow:hidden}
+.aboutWebsite summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 16px;user-select:none}
+.aboutWebsite summary::-webkit-details-marker{display:none}
+.aboutWebsite summary>span:first-child{display:grid;gap:4px}
+.aboutWebsite summary .eyebrow{display:block;margin:0;font-size:9px;letter-spacing:.16em;color:var(--muted);font-weight:800}
+.aboutWebsite summary strong{font-size:14px;color:var(--text);font-weight:800}
+.aboutChevron{font-size:18px;line-height:1;color:var(--muted);transition:transform .18s ease}
+.aboutWebsite[open] .aboutChevron{transform:rotate(180deg)}
+.aboutWebsite .noticeCard{border:0;border-top:1px solid rgba(255,255,255,.07);border-radius:0;padding:16px;background:rgba(255,255,255,.012)}
+.siteFooter{margin-top:12px;padding:26px 0 48px;display:flex;justify-content:space-between;align-items:center;gap:20px;border-top:1px solid rgba(255,255,255,.07)}
+.footerBrand{display:grid;gap:5px}
+.footerBrand strong{font-size:17px;letter-spacing:.08em;font-weight:900;background:linear-gradient(90deg,#fff,#b9c7d8);-webkit-background-clip:text;background-clip:text;color:transparent}
+.footerBrand span{font-size:11px;color:var(--muted);line-height:1.55;letter-spacing:.02em}
+.footerBrand span i{font-style:normal;opacity:.55;padding:0 2px}
+.footerNotice{font-size:10px;color:var(--muted);line-height:1.5;text-align:right}
+@media(max-width:640px){.siteFooter{display:grid;grid-template-columns:1fr;gap:10px;padding-bottom:34px}.footerNotice{text-align:left}.aboutWebsite summary{padding:13px 14px}}
