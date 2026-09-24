@@ -71,6 +71,7 @@ DEFAULT_SETTINGS = {
         "upi_id": "",
         "manual_instructions": MANUAL_PAYMENT_INSTRUCTIONS,
         "manual_qr": MANUAL_PAYMENT_QR,
+        "plans": {},
     },
     "site": {
         "maintenance": False,
@@ -220,6 +221,14 @@ def _validate(state):
     payments = state.get("payments", {})
     if payments.get("activation_mode", "environment") not in {"environment", "auto", "manual"}:
         raise ValueError("payments.activation_mode must be environment, auto, or manual")
+    if isinstance(payments.get("plans"), dict):
+        for plan_id, plan in payments["plans"].items():
+            if not isinstance(plan, dict):
+                raise ValueError(f"payments.plans.{plan_id} must be an object")
+            if "price_inr" in plan:
+                plan["price_inr"] = max(1, min(100000, int(plan["price_inr"])))
+            if "days" in plan:
+                plan["days"] = max(1, min(3650, int(plan["days"])))
     # Website verification is browser-based. Telegram is not a required
     # verification dependency; each enabled stage must have a provider name
     # and API key before it is allowed to generate a short link.

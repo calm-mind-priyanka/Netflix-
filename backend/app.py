@@ -36,7 +36,7 @@ from .config import (
     telegram_ready,
 )
 from .admin_settings import get_settings as get_admin_settings, get_public_settings, get_value as get_admin_setting, update_settings as update_admin_settings, reset_settings as reset_admin_settings, remove_setting as remove_admin_setting, init_settings_store
-from .premium import status as premium_status, create_order as premium_create_order, verify_payment as premium_verify_payment, webhook as premium_webhook, admin_grant as premium_admin_grant, admin_revoke as premium_admin_revoke, admin_extend as premium_admin_extend, admin_premium_users as premium_admin_users, get_status as get_premium_status, manual_submit as premium_manual_submit, my_manual as premium_my_manual, admin_manual_list as premium_admin_manual_list, admin_manual_proof as premium_admin_manual_proof, admin_manual_decide as premium_admin_manual_decide
+from .premium import status as premium_status, create_order as premium_create_order, verify_payment as premium_verify_payment, webhook as premium_webhook, admin_grant as premium_admin_grant, admin_revoke as premium_admin_revoke, admin_extend as premium_admin_extend, admin_premium_users as premium_admin_users, get_status as get_premium_status, manual_submit as premium_manual_submit, my_manual as premium_my_manual, admin_manual_list as premium_admin_manual_list, admin_manual_proof as premium_admin_manual_proof, admin_manual_decide as premium_admin_manual_decide, plan_list as premium_plan_list
 from .database import (
     collection_counts,
     find_media,
@@ -242,6 +242,51 @@ async def enrich(title):
         if value is not None and (key != "poster" or not output.get("poster")):
             output[key] = value
     return output
+
+
+async def tmdb_season_meta(title, season, year=None):
+    """Return season-specific TMDB artwork/metadata when the request targets Sxx."""
+    if not TMDB_API_KEY or season is None:
+        return {}
+    try:
+        base = await tmdb_meta(title, "series", year)
+        # tmdb_meta does not expose the TMDB id, so search the TV endpoint again
+        # only for the season-specific poster. This remains metadata-only; real
+        # Telegram/AutoFilter files stay the source of truth.
+        session, semaphore = await _tmdb_session()
+        async with semaphore:
+            async with session.get(
+                "https://api.themoviedb.org/3/search/tv",
+                params={"api_key": TMDB_API_KEY, "query": title, "include_adult": "false"},
+            ) as response:
+                if response.status != 200:
+                    return {}
+                data = await response.json(content_type=None)
+        results = data.get("results") or []
+        wanted = normalize_for_search(title)
+        result = next(
+            (candidate for candidate in results
+             if normalize_for_search(candidate.get("name")) == wanted),
+            results[0] if results else None,
+        )
+        if not result or not result.get("id"):
+            return {}
+        async with semaphore:
+            async with session.get(
+                f"https://api.themoviedb.org/3/tv/{int(result['id'])}/season/{int(season)}",
+                params={"api_key": TMDB_API_KEY},
+            ) as response:
+                if response.status != 200:
+                    return {}
+                data = await response.json(content_type=None)
+        return {
+            "poster": _tmdb_image_url(data.get("poster_path"), "w500"),
+            "description": data.get("overview") or base.get("description"),
+            "rating": data.get("vote_average") if data.get("vote_average") is not None else base.get("rating"),
+        }
+    except Exception:
+        LOGGER.exception("TMDB season lookup failed for %s S%s", title, season)
+        return {}
 
 
 def _search_score(item, query_title):
@@ -618,10 +663,11 @@ async def search_files(request):
         parsed_files.append(item)
 
     # Query-level filters operate on the real parsed file records.
-    language = request.query.get("language", "").strip().casefold()
-    quality = request.query.get("quality", "").strip().casefold()
-    season = request.query.get("season", "").strip()
-    episode = request.query.get("episode", "").strip()
+    query_context = normalize_query(query)
+    language = request.query.get("language", "").strip().casefold() or str(query_context.get("language") or "").casefold()
+    quality = request.query.get("quality", "").strip().casefold() or str(query_context.get("quality") or "").casefold()
+    season = request.query.get("season", "").strip() or (str(query_context.get("season")) if query_context.get("season") is not None else "")
+    episode = request.query.get("episode", "").strip() or (str(query_context.get("episode")) if query_context.get("episode") is not None else "")
 
     def quality_norm(v):
         return re.sub(r"\s+", "", str(v or "")).casefold().rstrip("p")
@@ -667,12 +713,17 @@ async def search_files(request):
     panel_type = (first or {}).get("type") or "movie"
     panel_year = (first or {}).get("year")
     description = ""
+    rating = None
+    requested_season = int(season) if season.isdigit() else None
     if bool(get_admin_setting("metadata", "tmdb_enabled", default=True)) and TMDB_API_KEY and first:
-        if not poster or not description:
+        if requested_season is not None and panel_type == "series":
+            meta = await tmdb_season_meta(panel_title, requested_season, panel_year)
+        else:
             meta = await tmdb_meta(panel_title, panel_type, panel_year)
-            poster = poster or str(meta.get("poster") or "")
-            description = str(meta.get("description") or "")
-            panel_year = panel_year or meta.get("year")
+        poster = poster or str(meta.get("poster") or "")
+        description = str(meta.get("description") or "")
+        rating = meta.get("rating")
+        panel_year = panel_year or meta.get("year")
 
     total = len(filtered)
     start = page * page_size
@@ -699,6 +750,8 @@ async def search_files(request):
         "year": panel_year,
         "poster": poster,
         "description": description,
+        "rating": rating,
+        "requested_season": requested_season,
     })
 
 
@@ -1340,8 +1393,7 @@ def _set_status(request, name, configured):
 
 async def admin_settings_get(request):
     require_admin(request)
-    from .config import PREMIUM_PLANS
-    return web.json_response({"ok": True, "settings": get_public_settings(), "plans": [{"id": k, "name": v["name"], "days": v["days"], "price_inr": v["price_inr"]} for k, v in PREMIUM_PLANS.items()]}, headers={"Cache-Control": "no-store"})
+    return web.json_response({"ok": True, "settings": get_public_settings(), "plans": premium_plan_list()}, headers={"Cache-Control": "no-store"})
 
 
 async def admin_settings_update(request):
@@ -1412,8 +1464,7 @@ async def admin_settings_remove(request):
     GROUP_CACHE.clear()
     META_CACHE.clear()
     ULTRON_SEARCH.cache.clear()
-    from .config import PREMIUM_PLANS
-    return web.json_response({"ok": True, "settings": get_public_settings(), "plans": [{"id": k, "name": v["name"], "days": v["days"], "price_inr": v["price_inr"]} for k, v in PREMIUM_PLANS.items()]}, headers={"Cache-Control": "no-store"})
+    return web.json_response({"ok": True, "settings": get_public_settings(), "plans": premium_plan_list()}, headers={"Cache-Control": "no-store"})
 
 
 async def admin_settings_reset(request):

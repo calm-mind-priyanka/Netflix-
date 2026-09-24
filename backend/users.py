@@ -321,9 +321,14 @@ async def admin_history(request):
         raise web.HTTPUnauthorized(text="Admin login required")
     await _ready()
     uid = str(request.query.get("user_id", "")).strip()
+    event_type = str(request.query.get("event_type", "")).strip()
     page = _positive_int(request.query.get("page", "1"), 1, 1000000)
     limit = _positive_int(request.query.get("limit", "50"), 50, 100)
-    query = {"user_id": uid} if uid else {}
+    query = {}
+    if uid:
+        query["user_id"] = uid
+    if event_type:
+        query["event_type"] = event_type
     if history is None:
         return web.json_response({"ok": True, "history": [], "page": page, "limit": limit, "total": 0, "pages": 0})
     total = await history.count_documents(query)

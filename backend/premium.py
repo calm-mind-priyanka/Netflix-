@@ -17,7 +17,7 @@ from pathlib import Path
 from aiohttp import web
 
 from .config import (
-    PREMIUM_PLANS,
+    PREMIUM_PLANS as BASE_PREMIUM_PLANS,
     PAYMENT_PROVIDER,
     RAZORPAY_KEY_ID,
     RAZORPAY_KEY_SECRET,
@@ -34,10 +34,33 @@ async def _ready():
     await ensure_indexes()
 
 
+def premium_plans():
+    """Return the live Premium plans, including admin-configured prices."""
+    plans = {k: dict(v) for k, v in BASE_PREMIUM_PLANS.items()}
+    overrides = get_value("payments", "plans", default={}) or {}
+    if isinstance(overrides, dict):
+        for plan_id, value in overrides.items():
+            if plan_id not in plans or not isinstance(value, dict):
+                continue
+            if "price_inr" in value:
+                try:
+                    plans[plan_id]["price_inr"] = max(1, int(value["price_inr"]))
+                except (TypeError, ValueError):
+                    pass
+            if str(value.get("name") or "").strip():
+                plans[plan_id]["name"] = str(value["name"]).strip()
+            if "days" in value:
+                try:
+                    plans[plan_id]["days"] = max(1, int(value["days"]))
+                except (TypeError, ValueError):
+                    pass
+    return plans
+
+
 def plan_list():
     return [
         {"id": k, "name": v["name"], "days": v["days"], "price_inr": v["price_inr"]}
-        for k, v in PREMIUM_PLANS.items()
+        for k, v in premium_plans().items()
     ]
 
 
@@ -105,7 +128,7 @@ async def create_order(request):
     except Exception:
         return web.json_response({"ok": False, "error": "Invalid payment request"}, status=400)
     plan_id = str(body.get("plan_id", "30day"))
-    plan = PREMIUM_PLANS.get(plan_id)
+    plan = premium_plans().get(plan_id)
     if not plan:
         return web.json_response({"ok": False, "error": "Invalid premium plan"}, status=400)
     if PAYMENT_PROVIDER not in ("razorpay", "both") or not (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET):
@@ -183,7 +206,7 @@ async def _activate(uid, plan_id, source, payment_id="", actor="system", payment
         user = await users.find_one({"user_id": uid}, {"nickname": 1})
         if not user:
             raise ValueError("Website user does not exist")
-    plan = PREMIUM_PLANS[plan_id]
+    plan = premium_plans()[plan_id]
     now = int(time.time())
     old_doc = await premium_users.find_one({"user_id": uid}) or {}
     old = int(old_doc.get("expires_at", 0) or 0)
@@ -269,7 +292,7 @@ async def verify_payment(request):
     await _ready()
     order = await premium_orders.find_one({"order_id": oid})
     plan_id = order.get("plan_id") if order else None
-    if not order or order.get("user_id") != user["user_id"] or plan_id not in PREMIUM_PLANS:
+    if not order or order.get("user_id") != user["user_id"] or plan_id not in premium_plans():
         return web.json_response({"ok": False, "error": "Unknown order"}, status=400)
 
     if order.get("status") == "paid":
@@ -310,15 +333,15 @@ async def verify_payment(request):
         "provider_order_id": oid,
         "provider_payment_id": pay,
         "plan_id": plan_id,
-        "plan_name": PREMIUM_PLANS[plan_id]["name"],
-        "amount": PREMIUM_PLANS[plan_id]["price_inr"],
+        "plan_name": premium_plans()[plan_id]["name"],
+        "amount": premium_plans()[plan_id]["price_inr"],
         "currency": "INR",
         "status": "successful",
         "created_at": now,
         "verified_at": now,
         "expires_at": exp,
     })
-    await _record_history(user["user_id"], "PAYMENT_SUCCESS", {"payment_id": pay, "order_id": oid, "plan_id": plan_id, "amount": PREMIUM_PLANS[plan_id]["price_inr"]})
+    await _record_history(user["user_id"], "PAYMENT_SUCCESS", {"payment_id": pay, "order_id": oid, "plan_id": plan_id, "amount": premium_plans()[plan_id]["price_inr"]})
     return web.json_response({"ok": True, "plan": plan_id, "expires_at": exp})
 
 
@@ -338,12 +361,14 @@ async def webhook(request):
         return web.Response(status=200)
     await _ready()
     order = await premium_orders.find_one({"order_id": oid})
-    if order and order.get("status") != "paid" and order.get("plan_id") in PREMIUM_PLANS:
+    if order and order.get("status") != "paid" and order.get("plan_id") in premium_plans():
         order, claimed = await _claim_order(oid)
         if not claimed:
             return web.Response(status=200)
         plan_id = order["plan_id"]
-        expected_amount = PREMIUM_PLANS[plan_id]["price_inr"] * 100
+        expected_amount = int(order.get("amount", 0) or 0)
+        if expected_amount <= 0:
+            return web.Response(status=400)
         if int(entity.get("amount", expected_amount) or 0) != expected_amount:
             return web.Response(status=400)
         if str(entity.get("status", "captured")).lower() not in {"captured", "authorized"}:
@@ -360,8 +385,8 @@ async def webhook(request):
             "provider_order_id": oid,
             "provider_payment_id": entity.get("id", ""),
             "plan_id": plan_id,
-            "plan_name": PREMIUM_PLANS[plan_id]["name"],
-            "amount": PREMIUM_PLANS[plan_id]["price_inr"],
+            "plan_name": premium_plans()[plan_id]["name"],
+            "amount": premium_plans()[plan_id]["price_inr"],
             "currency": "INR",
             "status": "successful",
             "created_at": int(order.get("created_at", now)),
@@ -397,7 +422,7 @@ async def manual_submit(request):
             fields[part.name] = (await part.text()).strip()
 
     plan_id = fields.get("plan_id", "")
-    plan = PREMIUM_PLANS.get(plan_id)
+    plan = premium_plans().get(plan_id)
     utr = fields.get("utr", "").strip()
     if not plan or not proof:
         return web.json_response({"ok": False, "error": "Select a plan and upload payment screenshot."}, status=400)
@@ -534,7 +559,7 @@ async def admin_grant(request):
     body = await request.json()
     uid = str(body.get("user_id", "")).strip()
     plan_id = str(body.get("plan_id", "30day"))
-    if not uid or plan_id not in PREMIUM_PLANS:
+    if not uid or plan_id not in premium_plans():
         return web.json_response({"ok": False, "error": "user_id and valid plan_id required"}, status=400)
     user = await users.find_one({"user_id": uid}) if users is not None else None
     if not user:
@@ -547,8 +572,8 @@ async def admin_grant(request):
         "method": "admin_grant",
         "provider": "admin",
         "plan_id": plan_id,
-        "plan_name": PREMIUM_PLANS[plan_id]["name"],
-        "amount": PREMIUM_PLANS[plan_id]["price_inr"],
+        "plan_name": premium_plans()[plan_id]["name"],
+        "amount": premium_plans()[plan_id]["price_inr"],
         "currency": "INR",
         "status": "admin_granted",
         "created_at": int(time.time()),
@@ -578,7 +603,7 @@ async def admin_extend(request):
     body = await request.json()
     uid = str(body.get("user_id", "")).strip()
     plan_id = str(body.get("plan_id", "30day"))
-    if not uid or plan_id not in PREMIUM_PLANS:
+    if not uid or plan_id not in premium_plans():
         return web.json_response({"ok": False, "error": "user_id and valid plan_id required"}, status=400)
     user = await users.find_one({"user_id": uid}) if users is not None else None
     if not user:

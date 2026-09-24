@@ -5,8 +5,10 @@ one sequential verification cycle:
 
     stage 1 -> stage 2 -> stage 3 -> full verification validity
 
-Only enabled stages participate.  A user resumes from the stage they last
-completed while the current cycle is alive.  Once the cycle expires, the next
+Only enabled stages participate. A user resumes from the stage they last
+completed while the current 24-hour cycle is alive. The 24-hour cycle starts
+when Stage 1 is successfully completed; Stage 2/3 gaps control when later
+stages become due but never extend the master cycle. Once it expires, the next
 attempt starts again at the first enabled stage.  The AutoFilter media data is
 never modified by this module.
 """
@@ -95,10 +97,11 @@ async def _load_cookie_row(request):
 def required_stage(stage: int, verified_at: float, now: float | None = None) -> int:
     """Return the currently required stage in the active verification cycle.
 
-    The first enabled stage starts the cycle when its link is generated. After
-    a stage is completed, the configured gap for the next enabled stage controls
-    when that next stage is required. A zero gap means the next stage is available
-    immediately.
+    The 24-hour master cycle begins only when the first enabled stage is
+    successfully completed. After a stage is completed, the configured gap for
+    the next enabled stage controls when that next stage becomes required. A
+    zero gap means the next stage is available immediately. Later stages never
+    extend or restart the master cycle.
     """
     settings = _settings()
     now = now or time.time()
@@ -204,22 +207,41 @@ async def requirement(request: web.Request, file_id: str):
     user_id = user["user_id"] if user else ""
     issued = time.time()
 
-    # The master 24-hour cycle starts when the FIRST Stage-1 shortener link is
-    # generated.  It is deliberately tied to link generation, not to the
-    # moment the user returns from the shortener.  Once started, the same
-    # deadline is preserved for every later stage and is never extended by
-    # Stage 2 or Stage 3.
+    # The master cycle starts ONLY when the user successfully completes the
+    # first enabled shortener.  Stage 2/3 must never extend this deadline.
+    # Before Stage 1 is completed, the generated Stage-1 token has its own
+    # temporary lifetime; once Stage 1 completes, its completion timestamp
+    # becomes the fixed 24-hour cycle start.
     if row and float(row.get("cycle_expires_at", 0) or 0) > issued:
         cycle_expires = float(row.get("cycle_expires_at"))
-        cycle_started = float(row.get("cycle_started_at", issued) or issued)
+        cycle_started = float(row.get("cycle_started_at", 0) or 0)
     else:
-        cycle_started = issued
-        cycle_expires = _verification_expiry(issued)
+        cycle_started = 0.0
+        cycle_expires = 0.0
 
-    # The generated shortener link and the master cycle share the same expiry.
-    # This means that after 24 hours the complete cycle naturally resets to
-    # Stage 1, even if Stage 2/3 were never completed.
-    pending_expires = cycle_expires
+    if required == enabled[0]:
+        # A fresh first-stage link can be used for up to the configured validity
+        # period.  This is not the master cycle; that starts on successful
+        # completion below.
+        pending_expires = issued + _validity_hours(settings) * 3600
+    else:
+        # Later stages are only issued while the Stage-1-created master cycle
+        # is still alive.  Migrate older Stage-1 records by deriving the cycle
+        # from their successful completion timestamp instead of restarting it.
+        if (not cycle_expires or cycle_expires <= issued) and row and stage == enabled[0] and verified_at:
+            cycle_started = verified_at
+            cycle_expires = verified_at + _validity_hours(settings) * 3600
+        if not cycle_expires or cycle_expires <= issued:
+            return {
+                "verification_required": True,
+                "verification_url": "",
+                "tutorial_url": "",
+                "stage": enabled[0],
+                "shortener_name": _stage_label(enabled[0], settings),
+                "validity_hours": _validity_hours(settings),
+                "verification_error": "Verification cycle is not active. Please start Stage 1 again.",
+            }
+        pending_expires = cycle_expires
 
     await verification_tokens.insert_one({
         "code": code,
@@ -304,15 +326,14 @@ async def complete(request: web.Request):
     cycle_expires = float(row.get("cycle_expires_at", 0) or 0)
 
     if completed_stage == enabled[0]:
-        # Stage 1 already started the master cycle when its shortener link was
-        # generated.  Never restart or extend that deadline when the user
-        # returns from the shortener.
-        if cycle_expires <= now:
-            raise web.HTTPBadRequest(text="This verification cycle expired. Please start verification again.")
+        # Stage 1 completion is the exact point at which the 24-hour master
+        # cycle begins.  Returning from Stage 1 therefore starts the clock.
+        cycle_started = now
+        cycle_expires = _verification_expiry(now)
     elif cycle_expires <= now:
         raise web.HTTPBadRequest(text="This verification cycle expired. Please start verification again.")
 
-    # Every later stage keeps the original Stage-1 deadline.
+    # Every later stage keeps the original Stage-1 completion deadline.
     expires = cycle_expires
 
     result = await verification_tokens.update_one(
@@ -329,6 +350,26 @@ async def complete(request: web.Request):
     )
     if result.modified_count != 1:
         raise web.HTTPBadRequest(text="Verification link has already been used. Please request a new verification link.")
+
+    # Audit only a genuinely successful verification completion.  This gives
+    # Admin a reliable Stage 1/2/3 trace without treating abandoned/returned
+    # verification links as successful events.
+    try:
+        from .premium import _record_history
+        await _record_history(
+            current_user_id,
+            f"VERIFICATION_STAGE_{completed_stage}_SUCCESS",
+            {
+                "stage": completed_stage,
+                "final": is_final,
+                "file_id": str(row.get("file_id") or ""),
+                "cycle_started_at": cycle_started,
+                "cycle_expires_at": cycle_expires,
+            },
+            actor="verification",
+        )
+    except Exception:
+        pass
 
     base = _base_url(request)
     next_stage = enabled[position + 1] if not is_final else 0
