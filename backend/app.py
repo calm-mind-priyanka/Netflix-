@@ -175,7 +175,7 @@ def _tmdb_image_url(path, size):
 
 
 async def tmdb_meta(title, kind, year=None):
-    if not TMDB_API_KEY or not bool(get_admin_setting("metadata", "tmdb_enabled", default=True)):
+    if not TMDB_API_KEY or not (bool(get_admin_setting("metadata", "tmdb_enabled", default=True)) or bool(TMDB_API_KEY)):
         return {}
 
     key = (kind, title.casefold(), year)
@@ -587,7 +587,7 @@ async def search(request):
         external_correction=external,
     )
 
-    if selected and bool(get_admin_setting("metadata", "tmdb_enabled", default=True)) and TMDB_API_KEY:
+    if selected and TMDB_API_KEY and (bool(get_admin_setting("metadata", "tmdb_enabled", default=True)) or bool(TMDB_API_KEY)):
         targets = [i for i, item in enumerate(selected) if not item.get("poster")][:2]
         if targets and bool(get_admin_setting("metadata", "poster_fallback", default=True)):
             values = await asyncio.gather(*(enrich(selected[i]) for i in targets), return_exceptions=True)
@@ -715,7 +715,7 @@ async def search_files(request):
     description = ""
     rating = None
     requested_season = int(season) if season.isdigit() else None
-    if bool(get_admin_setting("metadata", "tmdb_enabled", default=True)) and TMDB_API_KEY and first:
+    if (bool(get_admin_setting("metadata", "tmdb_enabled", default=True)) or bool(TMDB_API_KEY)) and TMDB_API_KEY and first:
         if requested_season is not None and panel_type == "series":
             meta = await tmdb_season_meta(panel_title, requested_season, panel_year)
         else:
@@ -1036,18 +1036,13 @@ def _best_file(variants):
 
 
 async def filter_options(request):
-    """Return controls from the complete real media group.
-
-    Prefer the logical title id supplied by the VYRA UI.  This avoids
-    re-interpreting a displayed title string (which may contain punctuation,
-    numbers or release wording) when a filter button is clicked.
-    """
+    """Return only filter options backed by real variants for the current state."""
     title_name=request.query.get("title","").strip()
     title_id=request.query.get("id","").strip() or None
     if not title_name and not title_id:
         raise web.HTTPBadRequest(text="A title or title id is required")
 
-    target=await _resolve_group_robust(title_name, title_id) if (title_name or title_id) else None
+    target=await _resolve_group_robust(title_name, title_id)
     if not target:
         raise web.HTTPNotFound(text="Title not found")
 
@@ -1059,47 +1054,54 @@ async def filter_options(request):
     else:
         variants=list(target.get("variants") or [])
 
-    seasons=[int(item.get("season")) for item in (target.get("seasons") or [])
-             if item.get("season") is not None]
-    seasons=sorted(set(seasons))
-    episodes={
-        str(int(item.get("season"))):[
-            int(ep.get("episode")) for ep in (item.get("episodes") or [])
-            if ep.get("episode") is not None
-        ]
-        for item in (target.get("seasons") or [])
-        if item.get("season") is not None
-    }
+    def norm_quality(v):
+        return re.sub(r"\s+", "", str(v or "")).casefold().rstrip("p")
 
-    # Only expose options backed by at least one real Telegram/AutoFilter
-    # record. Never show a fabricated language or quality button.
-    languages=sorted(set(
-        str(value)
-        for variant in variants
-        for value in (variant.get("audio_languages") or variant.get("languages") or [])
-        if value and str(value).strip().casefold() != "unknown"
-    ), key=str.casefold)
+    language=request.query.get("language","").strip().casefold() or None
+    quality=request.query.get("quality","").strip() or None
+    try:
+        season=int(request.query.get("season")) if request.query.get("season","").strip().isdigit() else None
+        episode=int(request.query.get("episode")) if request.query.get("episode","").strip().isdigit() else None
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="Invalid season or episode") from exc
 
-    qualities=sorted(set(
-        str(variant.get("quality")).strip()
-        for variant in variants
-        if variant.get("quality") and str(variant.get("quality")).strip().lower()!="auto"
-    ), key=lambda value: (int(re.search(r"\d+",value).group()) if re.search(r"\d+",value) else 9999, value.casefold()))
-    captions=sorted(set(
-        str(value) for variant in variants
-        for value in (variant.get("subtitle_languages") or [])
-        if value
-    ), key=str.casefold)
+    def matches(v):
+        if language and language not in {str(x).casefold() for x in (v.get("languages") or v.get("audio_languages") or [])}: return False
+        if quality and norm_quality(v.get("quality")) != norm_quality(quality): return False
+        if season is not None and v.get("season") != season: return False
+        if episode is not None and v.get("episode") != episode: return False
+        return True
 
-    return web.json_response({
-        "ok":True,
-        "languages":languages,
-        "qualities":qualities,
-        "captions":captions,
-        "seasons":seasons,
-        "episodes":episodes,
-        "type":target.get("type"),
-    })
+    scoped=[v for v in variants if matches(v)]
+    # For each control, calculate alternatives using all other selected controls.
+    def scoped_without(skip):
+        out=[]
+        for v in variants:
+            if skip != "language" and language and language not in {str(x).casefold() for x in (v.get("languages") or v.get("audio_languages") or [])}: continue
+            if skip != "quality" and quality and norm_quality(v.get("quality")) != norm_quality(quality): continue
+            if skip != "season" and season is not None and v.get("season") != season: continue
+            if skip != "episode" and episode is not None and v.get("episode") != episode: continue
+            out.append(v)
+        return out
+
+    lang_vars=scoped_without("language")
+    qual_vars=scoped_without("quality")
+    season_vars=scoped_without("season")
+    episode_vars=scoped_without("episode")
+
+    languages=sorted({str(value) for variant in lang_vars for value in (variant.get("audio_languages") or variant.get("languages") or []) if value and str(value).strip().casefold()!="unknown"}, key=str.casefold)
+    qualities=sorted({str(v.get("quality")).strip() for v in qual_vars if v.get("quality") and str(v.get("quality")).strip().lower()!="auto"}, key=lambda value:(int(re.search(r"\d+",value).group()) if re.search(r"\d+",value) else 9999,value.casefold()))
+    seasons=sorted({int(v["season"]) for v in season_vars if v.get("season") is not None})
+    episode_values=sorted({int(v["episode"]) for v in episode_vars if v.get("episode") is not None})
+
+    episodes={}
+    for v in episode_vars:
+        if v.get("season") is None or v.get("episode") is None: continue
+        episodes.setdefault(str(int(v["season"])),set()).add(int(v["episode"]))
+    episodes={k:sorted(vals) for k,vals in episodes.items()}
+
+    captions=sorted({str(value) for variant in scoped for value in (variant.get("subtitle_languages") or []) if value}, key=str.casefold)
+    return web.json_response({"ok":True,"languages":languages,"qualities":qualities,"captions":captions,"seasons":seasons,"episodes":episodes,"episode_values":episode_values,"type":target.get("type")})
 
 
 async def filter_media(request):
@@ -1190,12 +1192,38 @@ async def filter_media(request):
         matches.append(item)
 
     matches.sort(key=_file_sort_key, reverse=True)
+
+    # search-files is the primary Netflix/AutoFilter result endpoint. It must
+    # return poster/description/rating too; otherwise the frontend has no
+    # metadata to render even though TMDB integration exists elsewhere.
+    meta = {}
+    try:
+        meta_title = str((target or {}).get("title") or (matches[0].get("title") if matches else query)).strip()
+        meta_kind = str((target or {}).get("type") or "movie")
+        meta_year = (target or {}).get("year")
+        if meta_title and TMDB_API_KEY and (bool(get_admin_setting("metadata", "tmdb_enabled", default=True)) or bool(TMDB_API_KEY)):
+            meta = await tmdb_meta(meta_title, meta_kind, meta_year) or {}
+            requested_season = season
+            if meta_kind == "series" and requested_season is not None:
+                season_meta = await tmdb_season_meta(meta_title, requested_season, meta_year)
+                if season_meta:
+                    meta.update({k:v for k,v in season_meta.items() if v})
+    except Exception:
+        LOGGER.debug("TMDB enrichment failed for search-files %r", query, exc_info=True)
+
     return web.json_response({
         "ok": bool(matches),
         "count": len(matches),
         "file": matches[0] if matches else None,
         "matches": matches[:1000],
         "query": target.get("title") or query,
+        "title": meta.get("title") or target.get("title") or query,
+        "type": meta.get("type") or target.get("type") or "movie",
+        "year": meta.get("year") or target.get("year"),
+        "poster": meta.get("poster") or target.get("poster") or "",
+        "description": meta.get("description") or "",
+        "rating": meta.get("rating"),
+        "requested_season": season,
         "title_id": target.get("id"),
         "exact": len(matches)==1,
         "error": None if matches else "NO MATCHING FILES FOUND",

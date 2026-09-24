@@ -60,7 +60,7 @@ DEFAULT_SETTINGS = {
         "welcome": False,
     },
     "metadata": {
-        "tmdb_enabled": False,
+        "tmdb_enabled": bool(os.getenv("TMDB_API_KEY", "").strip()),
         "poster_fallback": True,
     },
     "payments": {
