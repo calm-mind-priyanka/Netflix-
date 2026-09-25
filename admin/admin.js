@@ -75,10 +75,29 @@ $('savePayments').onclick=async()=>{
       const name=(document.querySelector(`[data-plan-name="${CSS.escape(id)}"]`)?.value||'').trim();
       if(id) plans[id]={price_inr:price,days,name};
     });
-    const payments={activation_mode:val('activationMode'),premium_bypass_verification:$('premiumBypass').checked,manual_enabled:$('manualEnabled').checked,upi_id:val('upiId'),manual_instructions:val('paymentInstructions'),plans};
+    const payments={
+      activation_mode:val('activationMode'),
+      premium_bypass_verification:$('premiumBypass').checked,
+      manual_enabled:$('manualEnabled').checked,
+      upi_id:val('upiId'),
+      manual_instructions:val('paymentInstructions'),
+      plans
+    };
     if(qr) payments.manual_qr=qr;
-    await api('/admin/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({payments})});
-    $('qrUpload').value=''; notice('Payment settings saved to MongoDB.','success'); await loadSettings();
+    const saved=await api('/admin/api/settings',{
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({payments})
+    });
+    // The write response is the source of truth; never redraw from stale/default data.
+    if(saved?.settings?.payments?.plans){
+      renderPlans(Object.entries(saved.settings.payments.plans).map(([id,v])=>({
+        id, name:v.name||id, days:Number(v.days||1), price_inr:Number(v.price_inr||1)
+      })));
+    }
+    $('qrUpload').value='';
+    notice('Payment settings saved permanently.','success');
+    await loadSettings();
   }catch(e){notice(`Payment save failed: ${e.message}`,'error');}finally{setBusy('savePayments',false);}
 };
 
@@ -137,7 +156,7 @@ async function loadRequests(){
   try{
     const d=await api('/admin/api/premium/manual'); const box=$('manualRequests'); box.innerHTML='';
     if(!d.requests?.length){box.innerHTML='<p class="muted">No manual payment requests.</p>';return;}
-    d.requests.forEach(r=>{const el=document.createElement('div');el.className='request';el.innerHTML=`<b>${esc(r.nickname||'Unknown')}</b> — <code>${esc(r.user_id)}</code><br>${esc(r.plan_name)} — ₹${esc(r.amount)} • ${esc(String(r.status||'pending').toUpperCase())}<br>UTR: <code>${esc(r.utr||'—')}</code><br><small>${new Date((r.created_at||0)*1000).toLocaleString()}</small><br><a href="/admin/api/premium/manual/${encodeURIComponent(r.id)}/proof" target="_blank" rel="noopener">View screenshot</a> ${r.status==='pending'?'<button data-rid="'+esc(r.id)+'" data-act="approve">Approve</button><button data-rid="'+esc(r.id)+'" data-act="reject" class="danger">Reject</button>':''}`;box.appendChild(el);});
+    d.requests.forEach(r=>{const el=document.createElement('div');el.className='request';el.innerHTML=`<b>${esc(r.nickname||'Unknown')}</b> — <code>${esc(r.user_id)}</code><br>${esc(r.plan_name)} — ₹${esc(r.amount)} • ${esc(String(r.status||'pending').toUpperCase())}<br><small>${new Date((r.created_at||0)*1000).toLocaleString()}</small><br><a href="/admin/api/premium/manual/${encodeURIComponent(r.id)}/proof" target="_blank" rel="noopener">View screenshot</a> ${r.status==='pending'?'<button data-rid="'+esc(r.id)+'" data-act="approve">Approve</button><button data-rid="'+esc(r.id)+'" data-act="reject" class="danger">Reject</button>':''}`;box.appendChild(el);});
     box.querySelectorAll('[data-act]').forEach(b=>b.onclick=async()=>{try{await api('/admin/api/premium/manual/decide',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:b.dataset.rid,action:b.dataset.act})});notice(`Request ${b.dataset.act}d.`,'success');await loadRequests();paymentUserFilter='';await loadPayments('',1);}catch(e){notice(e.message,'error');}});
   }catch(e){notice(`Requests: ${e.message}`,'error');}
 }
@@ -155,7 +174,7 @@ async function loadPayments(uidOverride=null, page=1){
     if(status)qs.set('status',status);
     const d=await api('/admin/api/payments?'+qs.toString());
     paymentPage=d.page||1;
-    $('paymentsList').innerHTML=d.payments?.length?d.payments.map(p=>`<div class="request"><b>${esc(p.nickname||'Unknown')}</b> — <code>${esc(p.user_id||'')}</code><br>${esc(p.plan_name||p.plan_id||'')} — ₹${esc(p.amount??'')} • ${esc(p.method||'')} • <b>${esc(p.status||'')}</b><br>${p.utr?`UTR: <code>${esc(p.utr)}</code><br>`:''}<small>${new Date((p.created_at||0)*1000).toLocaleString()}</small></div>`).join(''):'<p class="muted">No payments found.</p>';
+    $('paymentsList').innerHTML=d.payments?.length?d.payments.map(p=>`<div class="request"><b>${esc(p.nickname||'Unknown')}</b> — <code>${esc(p.user_id||'')}</code><br>${esc(p.plan_name||p.plan_id||'')} — ₹${esc(p.amount??'')} • ${esc(p.method||'')} • <b>${esc(p.status||'')}</b><br><small>${new Date((p.created_at||0)*1000).toLocaleString()}</small></div>`).join(''):'<p class="muted">No payments found.</p>';
     const pager=$('paymentPager');
     pager.innerHTML=d.pages>1?`<button id="paymentPrev" ${paymentPage<=1?'disabled':''}>Previous</button><span>Page ${paymentPage} / ${d.pages} • ${d.total} total</span><button id="paymentNext" ${paymentPage>=d.pages?'disabled':''}>Next</button>`:(d.total?`<span class="muted">${d.total} payment${d.total===1?'':'s'}</span>`:'');
     $('paymentPrev')?.addEventListener('click',()=>loadPayments(paymentUserFilter,paymentPage-1));
