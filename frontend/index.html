@@ -9,7 +9,7 @@
 </head>
 <body>
 <div id="app" class="app hidden">
-<header class="topbar"><button class="wordmark" id="homeBtn">VYRA</button><div class="topActions"><button id="accountBtn" class="topLink">Account</button><button id="verifyTopBtn" class="topLink verifyTop">✓ Verify</button><button id="premiumBtn" type="button" class="topLink premiumTop" aria-controls="premiumSection" aria-expanded="false">✦ Premium</button><button id="searchBtn" class="searchIcon" aria-label="Search">⌕</button></div></header>
+<header class="topbar"><button class="wordmark" id="homeBtn">VYRA</button><div class="topActions"><button id="accountBtn" class="topLink">Account</button><button id="verifyTopBtn" class="topLink verifyTop">✓ Verify</button><button id="premiumBtn" type="button" class="topLink premiumTop" aria-controls="premiumOverlay" aria-expanded="false">✦ Premium</button><button id="searchBtn" class="searchIcon" aria-label="Search">⌕</button></div></header>
 <main id="main">
 <section class="welcome"><p class="eyebrow">FAST • SIMPLE • REAL FILES</p><h1>Find it. Pick it. <span>Play it.</span></h1><p>Search the AutoFilter catalog without the heavy OTT clutter.</p><div class="searchMini"><input id="homeQuery" placeholder="Search movie, series, season or episode…" autocomplete="off"><button id="homeSearch">Search</button></div></section>
 <section id="searchSection" class="section hidden"><div class="sectionHead"><div><p class="eyebrow">AUTOFILTER SEARCH</p><h2 id="resultTitle">Results</h2></div><button id="clearSearch" class="ghost">Clear</button></div><div id="results" class="textList"></div></section>
@@ -19,19 +19,7 @@
 <div class="split"><div><div class="sectionHead compact"><h2>Movies</h2></div><div id="movies" class="nameList"></div></div><div><div class="sectionHead compact"><h2>Web Series</h2></div><div id="series" class="nameList"></div></div></div>
 <div class="sectionHead compact"><h2>Categories</h2></div><div id="categories" class="categoryList"></div>
 </section>
-<section id="premiumSection" class="section premiumSection hidden"><div class="sectionHead"><div><p class="eyebrow">ACCESS</p><h2>Premium</h2></div><span id="premiumBadge" class="badge">FREE</span></div><p id="premiumCopy">Premium can remove verification checks when enabled by the admin.</p><div id="premiumBenefits" class="premiumBenefits">
-<h3>🎁 ᴘʀᴇᴍɪᴜᴍ ғᴇᴀᴛᴜʀᴇ ʙᴇɴᴇғɪᴛs</h3>
-<ul>
-<li>❏ ɴᴏ ɴᴇᴇᴅ ᴛᴏ ᴏᴘᴇɴ ʟɪɴᴋs</li>
-<li>❏ ɢᴇᴛ ᴅɪʀᴇᴄᴛ ғɪʟᴇs</li>
-<li>❏ ᴀᴅ-ғʀᴇᴇ ᴇxᴘᴇʀɪᴇɴᴄᴇ</li>
-<li>❏ ʜɪɢʜ-sᴘᴇᴇᴅ ᴅᴏᴡɴʟᴏᴀᴅ ʟɪɴᴋ</li>
-<li>❏ ᴍᴜʟᴛɪ-ᴘʟᴀʏᴇʀ sᴛʀᴇᴀᴍɪɴɢ ʟɪɴᴋs</li>
-<li>❏ ᴜɴʟɪᴍɪᴛᴇᴅ ᴍᴏᴠɪᴇs ᴀɴᴅ sᴇʀɪᴇs</li>
-<li>❏ ꜰᴜʟʟ ᴀᴅᴍɪɴ sᴜᴘᴘᴏʀᴛ</li>
-<li>❏ ʀᴇǫᴜᴇsᴛs ᴄᴀɴ ʙᴇ ᴄᴏᴍᴘʟᴇᴛᴇᴅ ɪɴ 𝟷ʜ ɪꜰ ᴀᴠᴀɪʟᴀʙʟᴇ</li>
-</ul>
-</div><div id="premiumPlans" class="plans"></div><div id="manualPay" class="manual hidden"><div class="paymentBox"><strong>Manual UPI payment</strong><p id="manualInstructions"></p><p id="manualUpi" class="mono"></p><img id="manualQr" class="manualQr hidden" alt="Payment QR"></div><div class="upload"><label>Premium plan<select id="manualPlan"></select></label><label>UTR / Payment reference<input id="premiumUtr" maxlength="80" placeholder="Enter UTR/reference number"></label><label>Payment screenshot<input id="premiumProof" type="file" accept="image/png,image/jpeg,image/webp"></label><textarea id="premiumNote" placeholder="Optional note"></textarea><button id="manualSubmit">Submit proof</button></div><p id="manualState"></p><div id="manualHistory" class="manualHistory"></div></div></section>
+
 <section class="section siteNotice" id="siteNotice">
   <details class="aboutWebsite">
     <summary><span><span class="eyebrow">SITE NOTICE</span><strong>About this website</strong></span><span class="aboutChevron" aria-hidden="true">⌄</span></summary>
@@ -50,6 +38,19 @@
   </div>
   <div class="footerNotice"><span>© 2026 VYRALight</span></div>
 </footer>
+</div>
+<div id="premiumOverlay" class="overlay premiumOverlay hidden" aria-hidden="true" role="dialog" aria-modal="true">
+  <div class="premiumModal">
+    <button class="close" id="premiumClose" type="button" aria-label="Close Premium">×</button>
+    <div class="premiumHero">
+      <p class="eyebrow">VYRA ACCESS</p>
+      <div class="premiumHeroRow"><div><h2>Premium</h2><p id="premiumCopy" class="muted">Unlock the Premium access options available on this website.</p></div><span id="premiumBadge" class="badge">FREE</span></div>
+    </div>
+    <div id="premiumBenefits" class="premiumBenefits"><h3>Premium benefits</h3><ul><li>No verification checks while Premium is active</li><li>Direct file access where supported</li><li>Faster, cleaner movie and series experience</li><li>Unlimited catalog access</li></ul></div>
+    <div class="premiumPlansHead"><span>Choose a plan</span><span class="muted">Prices are controlled by the admin</span></div>
+    <div id="premiumPlans" class="plans"></div>
+    <div id="manualPay" class="manual hidden"><div class="paymentBox"><strong>Manual payment</strong><p id="manualInstructions"></p><p id="manualUpi" class="mono"></p><img id="manualQr" class="manualQr hidden" alt="Payment QR"></div><div class="upload"><label>Premium plan<select id="manualPlan"></select></label><label>Payment screenshot<input id="premiumProof" type="file" accept="image/png,image/jpeg,image/webp"></label><textarea id="premiumNote" placeholder="Optional note"></textarea><button id="manualSubmit" type="button">Submit payment proof</button></div><p id="manualState"></p><div id="manualHistory" class="manualHistory"></div></div>
+  </div>
 </div>
 <div id="detail" class="overlay hidden"><div class="drawer"><button class="close" data-close="detail">×</button><div id="detailBody"></div></div></div>
 <div id="verify" class="overlay hidden"><div class="modal"><button class="close" data-close="verify">×</button><p class="eyebrow">ACCESS CHECK</p><h2>Verification required</h2><p id="verifyText">Verification is required before this file can be opened.</p><div class="verifyActions"><a id="verifyLink" class="primary" target="_blank" rel="noopener">Start verification</a><a id="tutorialLink" class="secondary hidden" target="_blank" rel="noopener">How to verify</a><button id="verifyRefresh" class="secondary">Check again</button><button id="buyPremiumFromVerify" class="secondary">Buy Premium</button></div><p id="verifyState" class="muted"></p></div></div>
