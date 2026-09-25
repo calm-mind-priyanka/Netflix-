@@ -58,7 +58,13 @@ async def ensure_indexes():
         await history.create_index([("user_id", 1), ("created_at", -1)])
         await history.create_index([("event_type", 1), ("created_at", -1)])
         await premium_manual.create_index([("status", 1), ("created_at", 1)])
-        await premium_manual.create_index("utr", unique=True, sparse=True)
+        # Manual Premium payments use screenshot proof only; no UTR index is needed.
+        # Remove the legacy unique index if it exists so multiple screenshot-only
+        # submissions are accepted.
+        try:
+            await premium_manual.drop_index("utr_1")
+        except Exception:
+            pass
         await verification_tokens.create_index("code", unique=True)
         await verification_tokens.create_index("expires", expireAfterSeconds=0)
         await verification_tokens.create_index([("user_id", 1), ("stage", 1), ("expires", -1)])
