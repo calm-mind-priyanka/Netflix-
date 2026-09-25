@@ -13,7 +13,7 @@ import os
 from copy import deepcopy
 from urllib.parse import urlparse
 
-from .config import MANUAL_PAYMENT_INSTRUCTIONS, MANUAL_PAYMENT_QR, PAYMENT_PROVIDER
+from .config import MANUAL_PAYMENT_INSTRUCTIONS, MANUAL_PAYMENT_QR, PAYMENT_PROVIDER, PREMIUM_PLANS
 
 DEFAULT_SETTINGS = {
     # Names intentionally follow the website UI, while ``ultron`` below keeps
@@ -71,7 +71,7 @@ DEFAULT_SETTINGS = {
         "upi_id": "",
         "manual_instructions": MANUAL_PAYMENT_INSTRUCTIONS,
         "manual_qr": MANUAL_PAYMENT_QR,
-        "plans": {},
+        "plans": deepcopy(PREMIUM_PLANS),
     },
     "site": {
         "maintenance": False,

@@ -423,17 +423,12 @@ async def manual_submit(request):
 
     plan_id = fields.get("plan_id", "")
     plan = premium_plans().get(plan_id)
-    utr = fields.get("utr", "").strip()
     if not plan or not proof:
         return web.json_response({"ok": False, "error": "Select a plan and upload payment screenshot."}, status=400)
-    if len(utr) < 6 or len(utr) > 80:
-        return web.json_response({"ok": False, "error": "Enter a valid UTR/reference number."}, status=400)
 
     await _ready()
-    existing = await premium_manual.find_one({"utr": utr}, {"_id": 1, "status": 1})
-    if existing:
-        return web.json_response({"ok": False, "error": "This UTR/reference has already been submitted."}, status=409)
-
+    # UTR/reference is intentionally optional. A screenshot + selected plan is
+    # enough for the admin to review and approve the request.
     req_id = secrets.token_urlsafe(12)
     now = int(time.time())
     doc = {
@@ -443,7 +438,7 @@ async def manual_submit(request):
         "plan_id": plan_id,
         "plan_name": plan["name"],
         "amount": plan["price_inr"],
-        "utr": utr,
+        "utr": "",
         "proof": proof[0],
         "proof_ext": proof[1],
         "proof_name": proof_name,
@@ -464,12 +459,12 @@ async def manual_submit(request):
         "amount": plan["price_inr"],
         "currency": "INR",
         "status": "pending",
-        "utr": utr,
+        "utr": "",
         "proof_reference": f"manual:{req_id}",
         "note": fields.get("note", ""),
         "created_at": now,
     })
-    await _record_history(user["user_id"], "MANUAL_PAYMENT_SUBMITTED", {"request_id": req_id, "plan_id": plan_id, "amount": plan["price_inr"], "utr": utr})
+    await _record_history(user["user_id"], "MANUAL_PAYMENT_SUBMITTED", {"request_id": req_id, "plan_id": plan_id, "amount": plan["price_inr"]})
     return web.json_response({"ok": True, "request_id": req_id, "status": "pending", "message": "Payment proof sent for admin approval."})
 
 
