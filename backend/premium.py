@@ -417,14 +417,6 @@ async def manual_submit(request):
             raw = await part.read(decode=False)
             if len(raw) > 5 * 1024 * 1024:
                 return web.json_response({"ok": False, "error": "Proof image must be 5MB or smaller."}, status=400)
-            # MongoDB/BSON does not accept a Python bytearray directly.
-            # Normalize every upload buffer to immutable bytes before it is
-            # stored so multipart/file implementations that return a
-            # bytearray or memoryview cannot trigger a BSON TypeError.
-            try:
-                raw = bytes(raw)
-            except (TypeError, ValueError):
-                return web.json_response({"ok": False, "error": "Invalid payment proof image."}, status=400)
             proof = (raw, ext)
         else:
             fields[part.name] = (await part.text()).strip()
@@ -435,8 +427,6 @@ async def manual_submit(request):
         return web.json_response({"ok": False, "error": "Select a plan and upload payment screenshot."}, status=400)
 
     await _ready()
-    # UTR/reference is intentionally optional. A screenshot + selected plan is
-    # enough for the admin to review and approve the request.
     req_id = secrets.token_urlsafe(12)
     now = int(time.time())
     doc = {
@@ -446,10 +436,7 @@ async def manual_submit(request):
         "plan_id": plan_id,
         "plan_name": plan["name"],
         "amount": plan["price_inr"],
-        "utr": "",
-        # Keep the stored BSON value explicitly as immutable bytes. This is
-        # important even if an upstream multipart reader supplies bytearray.
-        "proof": bytes(proof[0]),
+        "proof": proof[0],
         "proof_ext": proof[1],
         "proof_name": proof_name,
         "note": fields.get("note", ""),
@@ -469,7 +456,6 @@ async def manual_submit(request):
         "amount": plan["price_inr"],
         "currency": "INR",
         "status": "pending",
-        "utr": "",
         "proof_reference": f"manual:{req_id}",
         "note": fields.get("note", ""),
         "created_at": now,
@@ -550,11 +536,11 @@ async def admin_manual_decide(request):
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         await premium_manual.update_one({"request_id": rid}, {"$set": {"status": "approved", "approved_at": now, "reviewed_at": now, "expires_at": exp}})
         await payments.update_one({"payment_id": rid}, {"$set": {"status": "approved", "reviewed_at": now, "approved_at": now, "expires_at": exp}})
-        await _record_history(r["user_id"], "MANUAL_PAYMENT_APPROVED", {"request_id": rid, "utr": r.get("utr", ""), "expires_at": exp}, actor="admin")
+        await _record_history(r["user_id"], "MANUAL_PAYMENT_APPROVED", {"request_id": rid, "expires_at": exp}, actor="admin")
     else:
         await premium_manual.update_one({"request_id": rid}, {"$set": {"status": "rejected", "rejected_at": now, "reviewed_at": now}})
         await payments.update_one({"payment_id": rid}, {"$set": {"status": "rejected", "reviewed_at": now, "rejected_at": now}})
-        await _record_history(r["user_id"], "MANUAL_PAYMENT_REJECTED", {"request_id": rid, "utr": r.get("utr", "")}, actor="admin")
+        await _record_history(r["user_id"], "MANUAL_PAYMENT_REJECTED", {"request_id": rid}, actor="admin")
     return web.json_response({"ok": True, "status": action})
 
 
