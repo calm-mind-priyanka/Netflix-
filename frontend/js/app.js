@@ -917,6 +917,9 @@ function showDevilFilterMenu(panel,kind){
 }
 
 async function loadDevilFiles(panel,restoreY=null){
+  // Preserve the filter panel's viewport position while the file list changes.
+  // This prevents mobile browsers from jumping down/up after a filter click.
+  const anchor=panel.getBoundingClientRect().top;
   const q=new URLSearchParams({q:panel._query,page:String(panel._page||0)});
   const f=panel._filters||{};
   if(f.language)q.set('language',f.language);
@@ -930,9 +933,10 @@ async function loadDevilFiles(panel,restoreY=null){
     panel._data=d;
     renderDevilMeta(panel,d,panel._query);
     renderDevilFiles(panel,d);
-    if(restoreY!==null){
-      requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo({top:restoreY,left:0,behavior:'instant'})));
-    }
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      const after=panel.getBoundingClientRect().top;
+      window.scrollBy({top:after-anchor,left:0,behavior:'auto'});
+    }));
   }catch(e){box.innerHTML=`<div class="devilEmpty">${esc(e.message)}</div>`;}
 }
 
@@ -1571,7 +1575,7 @@ async function loadPremium(){
 
       show('manualPay');
 
-      $('manualInstructions').textContent=d.manual_instructions||'Pay using the configured UPI/QR, then submit the UTR/reference and screenshot for admin approval.';
+      $('manualInstructions').textContent=d.manual_instructions||'Pay using the configured UPI/QR, then submit the payment screenshot for admin approval.';
       $('manualUpi').textContent=d.upi_id ? `UPI ID: ${d.upi_id}` : 'UPI ID is not configured yet.';
 
       $('manualPlan').innerHTML=
@@ -1637,16 +1641,7 @@ async function buyPlan(
     }
 
     show('manualPay');
-
-    $('manualPay')
-      .scrollIntoView({
-        behavior:'smooth',
-        block:'center'
-      });
-
-    toast(
-      'Upload your payment screenshot for admin approval.'
-    );
+    toast('Upload your payment screenshot for admin approval.');
 
     return;
   }
@@ -1820,7 +1815,7 @@ async function loadManualHistory(){
 
             <small>
               ${esc(String(r.status||'pending').toUpperCase())}
-              ${r.utr ? ` • UTR: ${esc(r.utr)}` : ''}
+              
             </small>
 
           </div>
@@ -1876,8 +1871,6 @@ $('manualSubmit').onclick=
 
     fd.append('plan_id', plan);
 
-    fd.append('utr', $('premiumUtr').value.trim());
-
     fd.append(
       'note',
       $('premiumNote').value
@@ -1932,7 +1925,6 @@ $('manualSubmit').onclick=
       );
 
       $('premiumProof').value='';
-      $('premiumUtr').value='';
       $('premiumNote').value='';
 
       await loadManualHistory();
@@ -1972,16 +1964,13 @@ function restoreScrollY(y){
   }));
 }
 async function openPremiumPanel(){
-  const section=$('premiumSection');
-  if(!section){ toast('Premium section is unavailable.'); return; }
+  const section=$('premiumOverlay');
+  if(!section){ toast('Premium panel is unavailable.'); return; }
   section.classList.remove('hidden');
   section.setAttribute('aria-hidden','false');
+  document.body.classList.add('modalOpen');
   premiumButton?.setAttribute('aria-expanded','true');
-  const y=preserveScrollY();
   try{ await loadPremium(); }catch(_){ /* loadPremium already reports the error */ }
-  requestAnimationFrame(()=>requestAnimationFrame(()=>{
-    section.scrollIntoView({behavior:'smooth',block:'start'});
-  }));
 }
 function openVerificationFromTop(){
   if(!currentFile){
@@ -2134,6 +2123,18 @@ $('logoutAccount').onclick=async()=>{
     toast('Logged out.');
   }catch(e){toast(e.message);}
 };
+
+/* Dedicated Premium modal: opening/closing never moves the homepage scroll. */
+$('premiumClose')?.addEventListener('click',()=>{
+  const panel=$('premiumOverlay');
+  panel?.classList.add('hidden');
+  panel?.setAttribute('aria-hidden','true');
+  document.body.classList.remove('modalOpen');
+  premiumButton?.setAttribute('aria-expanded','false');
+});
+$('premiumOverlay')?.addEventListener('click',e=>{
+  if(e.target===$('premiumOverlay')) $('premiumClose')?.click();
+});
 
 /* =========================
    MAIN CONTROLS
