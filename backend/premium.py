@@ -415,6 +415,7 @@ async def manual_submit(request):
             if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
                 return web.json_response({"ok": False, "error": "Proof must be JPG, PNG or WEBP."}, status=400)
             raw = await part.read(decode=False)
+            raw = bytes(raw)
             if len(raw) > 5 * 1024 * 1024:
                 return web.json_response({"ok": False, "error": "Proof image must be 5MB or smaller."}, status=400)
             proof = (raw, ext)
