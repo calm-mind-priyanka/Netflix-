@@ -417,6 +417,14 @@ async def manual_submit(request):
             raw = await part.read(decode=False)
             if len(raw) > 5 * 1024 * 1024:
                 return web.json_response({"ok": False, "error": "Proof image must be 5MB or smaller."}, status=400)
+            # MongoDB/BSON does not accept a Python bytearray directly.
+            # Normalize every upload buffer to immutable bytes before it is
+            # stored so multipart/file implementations that return a
+            # bytearray or memoryview cannot trigger a BSON TypeError.
+            try:
+                raw = bytes(raw)
+            except (TypeError, ValueError):
+                return web.json_response({"ok": False, "error": "Invalid payment proof image."}, status=400)
             proof = (raw, ext)
         else:
             fields[part.name] = (await part.text()).strip()
@@ -439,7 +447,9 @@ async def manual_submit(request):
         "plan_name": plan["name"],
         "amount": plan["price_inr"],
         "utr": "",
-        "proof": proof[0],
+        # Keep the stored BSON value explicitly as immutable bytes. This is
+        # important even if an upstream multipart reader supplies bytearray.
+        "proof": bytes(proof[0]),
         "proof_ext": proof[1],
         "proof_name": proof_name,
         "note": fields.get("note", ""),
